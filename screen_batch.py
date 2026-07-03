@@ -81,6 +81,13 @@ def validate_result(r) -> list[str]:
                 problems.append(f"{tag} 서명 있음인데 evidence 없음")
         if not d.get("doc_type"):
             problems.append(f"{tag}.doc_type 누락")
+        comp = d.get("completeness")
+        if comp is not None:
+            if not isinstance(comp, dict) or not isinstance(comp.get("complete"), bool):
+                problems.append(f"{tag}.completeness 형식 이상")
+        ext = d.get("extracted")
+        if ext is not None and not isinstance(ext, dict):
+            problems.append(f"{tag}.extracted 형식 이상")
     return problems
 
 

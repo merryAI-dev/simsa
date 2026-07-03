@@ -35,7 +35,7 @@ def cache_version(model: str = MODEL) -> str:
 
 URL = url_for(MODEL)
 
-PROMPT_VERSION = "screen-v2"
+PROMPT_VERSION = "screen-v3"
 SCREENING_PROMPT = """당신은 정부 지원사업 제출서류 적격심사 보조원입니다.
 첨부된 PDF 를 보고 아래 JSON 스키마로만 답하세요.
 
@@ -55,6 +55,17 @@ SCREENING_PROMPT = """당신은 정부 지원사업 제출서류 적격심사 �
         "evidence": "판단 근거를 한 문장으로"
       },
       "date_written": "문서에 기재된 작성일 (YYYY-MM-DD, 없으면 null)",
+      "extracted": {
+        "company_name": "문서에 기재된 기관/법인명 (없으면 null)",
+        "representative_name": "문서에 기재된 대표자/대표이사 성명 (없으면 null)",
+        "business_reg_no": "사업자등록번호 (없으면 null)",
+        "corp_reg_no": "법인등록번호 (없으면 null)",
+        "issue_date": "증명서류의 발급일 YYYY-MM-DD (없으면 null)"
+      },
+      "completeness": {
+        "complete": true | false,
+        "evidence": "판단 근거 한 문장 (예: '2페이지 중 2페이지 모두 포함됨')"
+      },
       "verdict": "pass | fail | uncertain",
       "confidence": 0.0~1.0,
       "notes": "심사위원이 알아야 할 특이사항 (없으면 null)"
@@ -69,7 +80,10 @@ SCREENING_PROMPT = """당신은 정부 지원사업 제출서류 적격심사 �
 - seal_owner: 제출 기관(신청자/대표자)의 서명·날인이면 "제출자", 세무서장·법원 등 증명서 발급기관의 관인이면 "발급기관".
 - 원래 서명·날인이 필요 없는 문서 유형(사업개요서, 사업제안서, 예산계획서, 체크리스트, 증빙자료 모음 등)은 서명이 없다는 이유로 fail 하지 마세요. 내용이 실제로 작성되어 있으면 pass 입니다.
 - 내용이 채워지지 않은 빈 양식(템플릿)이 제출된 경우는 fail 입니다.
-- signer_name 은 서명·날인 바로 옆에 적힌 이름만 쓰세요. 문서의 다른 곳에 나온 이름을 추측해서 넣지 마세요."""
+- signer_name 은 서명·날인 바로 옆에 적힌 이름만 쓰세요. 문서의 다른 곳에 나온 이름을 추측해서 넣지 마세요.
+- extracted 필드는 문서에 명시적으로 적힌 값만 옮기세요. 추측하거나 다른 문서에서 가져오지 마세요.
+- 증명서류(사업자등록증, 법인등기사항전부증명서, 건강보험자격득실확인서 등)에 총 페이지 수나 장수가 표기되어 있는데 실제 포함된 페이지가 부족하면(예: '2페이지 중 1페이지') completeness.complete=false 로 하고 verdict="uncertain" 으로 하세요.
+- 법인등기사항전부증명서는 법인명, 대표이사(사내이사 등 대표권자) 성명, 법인등록번호, 발급일을 extracted 에 기록하세요. 해산·청산·말소 등기, 임원 임기 만료, 폐쇄사항 표시가 보이면 notes 에 쓰고 verdict="uncertain" 으로 하세요."""
 
 
 def load_api_key() -> str:

@@ -29,3 +29,6 @@ urllib3
 websockets
 .DS_Store
 .env
+converted/
+logs/
+*.xlsx

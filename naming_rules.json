@@ -1,0 +1,22 @@
+{
+  "_comment": "파일명 정규화 규칙. template 의 {code}/{doc_type} 이 치환된다. hints 는 원본 파일명 부분일치(순서대로 첫 매치). 힌트로 못 잡으면 VLM 이 doc_type 목록에서 분류한다.",
+  "template": "{code}. {doc_type}",
+  "unknown_prefix": "미분류_",
+  "min_confidence": 0.5,
+  "doc_types": [
+    {"code": "1", "doc_type": "공문", "hints": ["공문"]},
+    {"code": "1-1", "doc_type": "공모체크리스트", "hints": ["체크리스트"]},
+    {"code": "2-1", "doc_type": "국문사업개요서", "hints": ["사업개요서", "개요서"]},
+    {"code": "3-1", "doc_type": "사업제안서", "hints": ["사업제안서", "제안서"]},
+    {"code": "4-1", "doc_type": "예산계획서", "hints": ["예산계획서", "예산"]},
+    {"code": "5", "doc_type": "서약서", "hints": ["서약서"]},
+    {"code": "6-1", "doc_type": "실적증빙자료", "hints": ["실적증빙", "실적 증빙"]},
+    {"code": "6-2", "doc_type": "기타증빙자료", "hints": ["기타증빙", "기타 증빙"]},
+    {"code": "6-3", "doc_type": "참여인력확인서", "hints": ["참여인력"]},
+    {"code": "6-4", "doc_type": "사업책임자이력서", "hints": ["이력서"]},
+    {"code": "6-5", "doc_type": "개인정보수집이용동의서", "hints": ["개인정보"]},
+    {"code": "6-6", "doc_type": "대표자건강보험자격득실확인서", "hints": ["건강보험", "자격득실"]},
+    {"code": "6-7", "doc_type": "사업자등록증", "hints": ["사업자등록증", "사업자 등록증"]},
+    {"code": "6-8", "doc_type": "법인등기사항전부증명서", "hints": ["법인등기", "등기사항", "법인증기"]}
+  ]
+}

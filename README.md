@@ -52,6 +52,19 @@ python3.14 web_app.py --host 127.0.0.1 --port 8765
 
 결과 파일은 `runs/<job_id>/results/`에도 남습니다.
 
+### 파일명 정규화 (완료 폴더)
+
+제출물 파일명이 제각각일 때, PDF 변환 + 규칙/VLM 분류로 표준 파일명을 붙여 `완료/` 폴더에 저장합니다.
+
+```bash
+python3.14 normalize_files.py 제출서류.zip                     # → 완료/<제출건>/<코드>. <유형>.pdf
+python3.14 normalize_files.py 제출서류.zip --rules my_rules.json --out 결과폴더
+```
+
+- 파일명 규칙은 [naming_rules.json](naming_rules.json)에서 정의 (문서 유형·파일명 힌트·템플릿) — 프로그램마다 규칙 파일만 바꾸면 됨
+- 원본 파일명 힌트로 먼저 매칭(API 비용 0), 못 잡는 파일만 VLM이 내용 보고 분류
+- 분류 실패 파일은 `미분류_<원본명>.pdf`로 보존 (버리지 않음), 전체 매핑은 `완료/rename_map.json`에 기록
+
 ### CLI로 단계별 실행
 
 ```bash

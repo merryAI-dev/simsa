@@ -22,9 +22,12 @@ from pathlib import Path
 import requests
 
 from vlm_cache import VLMCache
-from vlm_screen import PROMPT_VERSION, SCREENING_PROMPT, URL, load_api_key
+from vlm_screen import (MODEL, PROMPT_VERSION, SCREENING_PROMPT, cache_version,
+                        load_api_key, url_for)
 
 BASE = Path(__file__).parent
+ESCALATION_MODEL = "gemini-pro-latest"  # uncertain/불명확/저확신 건만 상위 모델 재심사
+ESCALATION_CONF = 0.7
 MAX_ATTEMPTS = 3
 VERDICTS = {"pass", "fail", "uncertain"}
 SEAL_KINDS = {"자필서명", "도장(인감)", "법인직인", "전자서명", "불명확", "없음"}
@@ -98,7 +101,7 @@ def overall(r: dict) -> dict:
             "submitter_signed": signed, "n_docs": len(docs)}
 
 
-def call_gemini(pdf: Path, api_key: str, log, ctx: dict) -> dict:
+def call_gemini(pdf: Path, api_key: str, log, ctx: dict, model: str = MODEL) -> dict:
     """재시도 포함 API 호출 + 파싱. 실패 시 예외."""
     body = {
         "contents": [{
@@ -117,7 +120,7 @@ def call_gemini(pdf: Path, api_key: str, log, ctx: dict) -> dict:
         t0 = time.monotonic()
         try:
             resp = requests.post(
-                URL, json=body, timeout=180,
+                url_for(model), json=body, timeout=180,
                 headers={"Content-Type": "application/json", "X-goog-api-key": api_key},
             )
             ms = int((time.monotonic() - t0) * 1000)
@@ -149,8 +152,10 @@ def call_gemini(pdf: Path, api_key: str, log, ctx: dict) -> dict:
 
 
 def screen_one(pdf: Path, submission: str, cache: VLMCache, api_key: str,
-               logger: StageLogger, extra: str = "") -> dict:
+               logger: StageLogger, extra: str = "", model: str = MODEL) -> dict:
     ctx = {"submission": submission, "file": pdf.name}
+    if model != MODEL:
+        ctx["model"] = model
     if extra:
         ctx["probe"] = extra
     log = logger.log
@@ -174,7 +179,7 @@ def screen_one(pdf: Path, submission: str, cache: VLMCache, api_key: str,
         record.update(result=cached, cache_hit=True)
     else:
         try:
-            result = call_gemini(pdf, api_key, log, ctx)
+            result = call_gemini(pdf, api_key, log, ctx, model=model)
         except RuntimeError as e:
             record.update(needs_review=True, error=str(e), result=None)
             log(stage="done", ok=False, error=str(e)[:200], **ctx)
@@ -209,7 +214,7 @@ def main() -> int:
     workers = int(args[1]) if len(args) > 1 else 3
 
     api_key = load_api_key()
-    cache = VLMCache(BASE / "cache/vlm", prompt_version=PROMPT_VERSION)
+    cache = VLMCache(BASE / "cache/vlm", prompt_version=cache_version())
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     logger = StageLogger(BASE / "logs" / f"screening_{stamp}.jsonl")
 
@@ -235,6 +240,53 @@ def main() -> int:
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         results = list(pool.map(safe_one, jobs))
+
+    # ── 에스컬레이션: uncertain / 불명확 / 저확신 / 스키마실패 건만 상위 모델 재심사 ──
+    def wants_escalation(r: dict) -> bool:
+        if r["needs_review"]:
+            return True
+        ov = r.get("overall") or {}
+        if ov.get("verdict") == "uncertain":
+            return True
+        if (ov.get("confidence") or 1.0) < ESCALATION_CONF:
+            return True
+        docs = (r.get("result") or {}).get("documents") or []
+        return any(isinstance(d, dict)
+                   and (d.get("signature_or_seal") or {}).get("kind") == "불명확"
+                   for d in docs)
+
+    cands = [(i, r) for i, r in enumerate(results) if wants_escalation(r)]
+    if cands:
+        print(f"\n에스컬레이션 {len(cands)}건 → {ESCALATION_MODEL}")
+        pro_cache = VLMCache(BASE / "cache/vlm",
+                             prompt_version=cache_version(ESCALATION_MODEL))
+
+        def escalate(item):
+            i, r = item
+            pdf = root / r["submission"] / r["file"]
+            try:
+                return i, screen_one(pdf, r["submission"], pro_cache, api_key,
+                                     logger, model=ESCALATION_MODEL)
+            except Exception as e:
+                logger.log(stage="done", ok=False, submission=r["submission"],
+                           file=r["file"], model=ESCALATION_MODEL,
+                           error=f"에스컬레이션 예외: {e}"[:200])
+                return i, None
+
+        with ThreadPoolExecutor(max_workers=min(workers, 2)) as pool:
+            for i, esc in pool.map(escalate, cands):
+                first = results[i]
+                if esc is None or esc["needs_review"]:
+                    first["tier"] = "flash (에스컬레이션 실패)"
+                    continue
+                v1 = (first.get("overall") or {}).get("verdict")
+                v2 = (esc.get("overall") or {}).get("verdict")
+                results[i] = {**esc, "tier": ESCALATION_MODEL,
+                              "first_pass": {"verdict": v1,
+                                             "needs_review": first["needs_review"],
+                                             "error": first["error"]}}
+                mark = "변경" if v1 != v2 else "유지"
+                print(f"  [{mark}] {first['file']}: {v1} → {v2}")
 
     out = root / f"screening_results_{stamp}.json"
     out.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")

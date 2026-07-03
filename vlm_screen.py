@@ -20,7 +20,20 @@ from vlm_cache import VLMCache
 
 BASE = Path(__file__).parent
 MODEL = "gemini-flash-latest"
-URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
+API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"
+
+
+def url_for(model: str = MODEL) -> str:
+    return f"{API_ROOT}/{model}:generateContent"
+
+
+def cache_version(model: str = MODEL) -> str:
+    """캐시 키에 들어가는 버전 문자열. 기본 모델은 기존 키와 호환 유지,
+    다른 모델은 모델명을 붙여 캐시를 분리한다 (flash 응답이 pro 로 둔갑 방지)."""
+    return PROMPT_VERSION if model == MODEL else f"{PROMPT_VERSION}@{model}"
+
+
+URL = url_for(MODEL)
 
 PROMPT_VERSION = "screen-v2"
 SCREENING_PROMPT = """당신은 정부 지원사업 제출서류 적격심사 보조원입니다.

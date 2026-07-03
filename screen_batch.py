@@ -27,7 +27,9 @@ from vlm_screen import PROMPT_VERSION, SCREENING_PROMPT, URL, load_api_key
 BASE = Path(__file__).parent
 MAX_ATTEMPTS = 3
 VERDICTS = {"pass", "fail", "uncertain"}
-SEAL_KINDS = {"자필서명", "도장(인감)", "법인직인", "전자서명", "없음"}
+SEAL_KINDS = {"자필서명", "도장(인감)", "법인직인", "전자서명", "불명확", "없음"}
+SEAL_OWNERS = {"제출자", "발급기관", "불명"}
+VERDICT_RANK = {"fail": 0, "uncertain": 1, "pass": 2}  # 종합판정 = 최악값
 
 
 class StageLogger:
@@ -45,28 +47,55 @@ class StageLogger:
 
 
 def validate_result(r) -> list[str]:
-    """스키마 위반 목록. 비어 있으면 유효."""
-    problems = []
+    """스키마 위반 목록. 비어 있으면 유효. (v2: documents 배열)"""
     if not isinstance(r, dict):
         return ["응답이 JSON 객체가 아님"]
-    if r.get("verdict") not in VERDICTS:
-        problems.append(f"verdict 이상: {r.get('verdict')!r}")
-    c = r.get("confidence")
-    if not isinstance(c, (int, float)) or not 0 <= c <= 1:
-        problems.append(f"confidence 이상: {c!r}")
-    s = r.get("signature_or_seal")
-    if not isinstance(s, dict):
-        problems.append("signature_or_seal 누락")
-    else:
-        if not isinstance(s.get("present"), bool):
-            problems.append(f"present 가 bool 아님: {s.get('present')!r}")
-        if s.get("kind") not in SEAL_KINDS:
-            problems.append(f"kind 이상: {s.get('kind')!r}")
-        if s.get("present") and not s.get("evidence"):
-            problems.append("서명 있음인데 evidence 없음")
-    if not r.get("doc_type"):
-        problems.append("doc_type 누락")
+    docs = r.get("documents")
+    if not isinstance(docs, list) or not docs:
+        return ["documents 배열 누락 또는 빈 배열"]
+    problems = []
+    for i, d in enumerate(docs):
+        tag = f"documents[{i}]"
+        if not isinstance(d, dict):
+            problems.append(f"{tag} 가 객체 아님")
+            continue
+        if d.get("verdict") not in VERDICTS:
+            problems.append(f"{tag}.verdict 이상: {d.get('verdict')!r}")
+        c = d.get("confidence")
+        if not isinstance(c, (int, float)) or not 0 <= c <= 1:
+            problems.append(f"{tag}.confidence 이상: {c!r}")
+        s = d.get("signature_or_seal")
+        if not isinstance(s, dict):
+            problems.append(f"{tag}.signature_or_seal 누락")
+        else:
+            if not isinstance(s.get("present"), bool):
+                problems.append(f"{tag}.present 가 bool 아님: {s.get('present')!r}")
+            if s.get("kind") not in SEAL_KINDS:
+                problems.append(f"{tag}.kind 이상: {s.get('kind')!r}")
+            if s.get("kind") not in ("없음", None) and s.get("seal_owner") not in SEAL_OWNERS:
+                problems.append(f"{tag}.seal_owner 이상: {s.get('seal_owner')!r}")
+            if s.get("present") and not s.get("evidence"):
+                problems.append(f"{tag} 서명 있음인데 evidence 없음")
+        if not d.get("doc_type"):
+            problems.append(f"{tag}.doc_type 누락")
     return problems
+
+
+def overall(r: dict) -> dict:
+    """documents 배열의 종합 뷰 (판정은 최악값, 서명은 제출자 서명 존재 여부)."""
+    docs = r.get("documents") or []
+    docs = [d for d in docs if isinstance(d, dict)]
+    if not docs:
+        return {}
+    worst = min(docs, key=lambda d: VERDICT_RANK.get(d.get("verdict"), 1))
+    signed = any(
+        (d.get("signature_or_seal") or {}).get("present")
+        and (d.get("signature_or_seal") or {}).get("seal_owner") == "제출자"
+        for d in docs)
+    return {"verdict": worst.get("verdict"),
+            "confidence": min((d.get("confidence") or 0) for d in docs),
+            "doc_type": " + ".join(str(d.get("doc_type")) for d in docs),
+            "submitter_signed": signed, "n_docs": len(docs)}
 
 
 def call_gemini(pdf: Path, api_key: str, log, ctx: dict) -> dict:
@@ -160,11 +189,12 @@ def screen_one(pdf: Path, submission: str, cache: VLMCache, api_key: str,
         record["result"] = result
 
     r = record.get("result")
-    r = r if isinstance(r, dict) else {}
+    ov = overall(r) if isinstance(r, dict) else {}
+    record["overall"] = ov
     log(stage="done", ok=not record["needs_review"],
-        verdict=r.get("verdict"), confidence=r.get("confidence"),
-        doc_type=r.get("doc_type"),
-        signed=(r.get("signature_or_seal") or {}).get("present"),
+        verdict=ov.get("verdict"), confidence=ov.get("confidence"),
+        doc_type=ov.get("doc_type"), signed=ov.get("submitter_signed"),
+        n_docs=ov.get("n_docs"),
         total_ms=int((time.monotonic() - t0) * 1000), **ctx)
     return record
 
@@ -213,8 +243,7 @@ def main() -> int:
     fails = [r for r in results if r["needs_review"]]
     verdicts = {}
     for r in ok:
-        res = r.get("result")
-        v = res.get("verdict") if isinstance(res, dict) else "invalid"
+        v = (r.get("overall") or {}).get("verdict") or "invalid"
         verdicts[v] = verdicts.get(v, 0) + 1
     print(f"\n완료: {len(ok)}개 정상 / {len(fails)}개 확인필요(needs_review)")
     print(f"판정 분포: {verdicts}")
@@ -233,15 +262,13 @@ def main() -> int:
         for r in sample:
             pdf = root / r["submission"] / r["file"]
             second = screen_one(pdf, r["submission"], cache, api_key, logger, extra="probe2")
-            r1, r2 = r["result"], second.get("result") or {}
-            same = (r1.get("verdict") == r2.get("verdict")
-                    and (r1.get("signature_or_seal") or {}).get("present")
-                    == (r2.get("signature_or_seal") or {}).get("present"))
+            o1, o2 = r.get("overall") or {}, second.get("overall") or {}
+            same = (o1.get("verdict") == o2.get("verdict")
+                    and o1.get("submitter_signed") == o2.get("submitter_signed"))
             agree += same
             mark = "일치" if same else "불일치!"
-            print(f"  [{mark}] {r['file']}: {r1.get('verdict')}/{r2.get('verdict')}, "
-                  f"signed {(r1.get('signature_or_seal') or {}).get('present')}"
-                  f"/{(r2.get('signature_or_seal') or {}).get('present')}")
+            print(f"  [{mark}] {r['file']}: {o1.get('verdict')}/{o2.get('verdict')}, "
+                  f"signed {o1.get('submitter_signed')}/{o2.get('submitter_signed')}")
         print(f"일관성: {agree}/{len(sample)}")
     return 0
 

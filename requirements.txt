@@ -3,3 +3,4 @@ numpy
 pillow
 pypdf
 pypdfium2
+requests

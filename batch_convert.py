@@ -40,6 +40,9 @@ def convert_submission(name: str, files: list[Path], out_dir: Path, workers: int
         info = detect_format(f)
         if info.format in CONVERTIBLE or info.format == "pdf":
             r = convert_to_pdf(f, dest)
+            if info.format == "xlsx":
+                # 엑셀→PDF 는 열 잘림 위험이 있어 원본도 함께 보존
+                shutil.copy2(f, dest / f.name)
             return {
                 "file": f.name, "format": r.format, "mismatch": r.mismatch,
                 "ok": r.ok, "pdf": r.pdf_path.name if r.pdf_path else None,

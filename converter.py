@@ -180,6 +180,9 @@ def _try_hwp5html_chrome(src: Path, out_dir: Path, timeout: int, result: Convers
 
 def _count_pages(pdf: Path) -> int:
     try:
+        import logging
+
+        logging.getLogger("pypdf").setLevel(logging.ERROR)
         from pypdf import PdfReader
         return len(PdfReader(str(pdf)).pages)
     except Exception:

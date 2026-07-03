@@ -131,7 +131,16 @@ def screen_one(pdf: Path, submission: str, cache: VLMCache, api_key: str,
 
     key = cache.key_for(pdf, extra=extra)
     cached = cache.get(key)
-    log(stage="cache", hit=cached is not None, **ctx)
+    if cached is not None:
+        # 캐시된 응답도 검증을 통과해야 사용 (과거 실행이 남긴 불량 응답 차단)
+        poisoned = validate_result(cached)
+        if poisoned:
+            log(stage="cache", hit=True, poisoned=poisoned, **ctx)
+            cached = None
+        else:
+            log(stage="cache", hit=True, **ctx)
+    else:
+        log(stage="cache", hit=False, **ctx)
     if cached is not None:
         record.update(result=cached, cache_hit=True)
     else:
@@ -204,7 +213,8 @@ def main() -> int:
     fails = [r for r in results if r["needs_review"]]
     verdicts = {}
     for r in ok:
-        v = r["result"]["verdict"]
+        res = r.get("result")
+        v = res.get("verdict") if isinstance(res, dict) else "invalid"
         verdicts[v] = verdicts.get(v, 0) + 1
     print(f"\n완료: {len(ok)}개 정상 / {len(fails)}개 확인필요(needs_review)")
     print(f"판정 분포: {verdicts}")

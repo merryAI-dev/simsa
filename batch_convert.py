@@ -77,6 +77,11 @@ def collect_submissions(input_dir: Path, tmp: Path) -> dict[str, list[Path]]:
                 print(f"[SKIP] {entry.name}: ZIP 해제 실패 — {e}")
                 continue
             subs[entry.stem] = _walk(target)
+    if not subs:
+        # 하위 폴더/ZIP 없이 파일만 있으면 폴더 자체를 제출건 하나로 취급
+        files = _walk(input_dir)
+        if files:
+            subs[input_dir.name] = files
     return subs
 
 
@@ -100,8 +105,13 @@ def main() -> int:
         if input_path.is_file() and input_path.suffix.lower() == ".zip":
             # 바깥 묶음 ZIP: 풀고, 단일 최상위 폴더면 그 안으로 진입
             outer = Path(td) / "_outer"
-            with zipfile.ZipFile(input_path, metadata_encoding="cp949") as zf:
-                zf.extractall(outer)
+            # 한국 Windows ZIP 은 cp949, macOS/리눅스 ZIP 은 UTF-8 파일명
+            try:
+                with zipfile.ZipFile(input_path, metadata_encoding="cp949") as zf:
+                    zf.extractall(outer)
+            except UnicodeDecodeError:
+                with zipfile.ZipFile(input_path, metadata_encoding="utf-8") as zf:
+                    zf.extractall(outer)
             tops = [p for p in outer.iterdir() if p.name not in SKIP_NAMES]
             input_dir = tops[0] if len(tops) == 1 and tops[0].is_dir() else outer
         subs = collect_submissions(input_dir, Path(td))

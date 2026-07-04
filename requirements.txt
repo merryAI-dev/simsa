@@ -5,3 +5,4 @@ pypdf
 pypdfium2
 requests
 openpyxl
+psycopg[binary]

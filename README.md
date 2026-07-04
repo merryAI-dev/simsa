@@ -96,3 +96,33 @@ vlm_cache.py      # VLM 응답 캐시 (프롬프트 버전 키, 오염 응답 �
 criteria/         # 심사 기준 (Seed1/2, CTS-TIPS)
 data/             # 기준일 등 참조 데이터
 ```
+
+## 검토 SaaS (review_app) — 범용 심사 팩 + 골든셋
+
+업로드 → 문서 유형 판별 → 규칙 기반 필드 탐지(box_2d 좌표) → 페이지 위 빨간 박스 검토 →
+맞음/틀림 피드백 → 골든셋 확정까지. 규칙·탐지·정답은 PostgreSQL 에 저장됩니다.
+Docker Desktop 이 추가로 필요합니다 (PostgreSQL 컨테이너).
+
+```bash
+python3.14 -m pip install -r requirements.txt   # psycopg 포함
+./start_review.sh                               # postgres 자동 기동 → http://127.0.0.1:8766
+```
+
+- **DB**: 컨테이너 `simsa-postgres` (호스트 포트 5544, 데이터는 `simsa_pgdata` 볼륨에 영속,
+  부팅 시 자동 시작). 접속 문자열은 `.env` 의 `DATABASE_URL` (없으면 로컬 기본값 사용).
+  스키마([schema.sql](schema.sql))와 koica-cts 팩 시드는 서버 시작 시 자동 적용됩니다.
+- **문서 유형 레지스트리**: "어떤 서류가 들어와야 하는가"의 기준. VLM 내용 판별이 주,
+  파일명 힌트는 보조. 필수 유형이 빠지면 제출건 화면에 누락 경고가 뜨고,
+  레지스트리에 없는 문서는 미등록 배너 → 클릭 한 번으로 등록됩니다.
+- **규칙 종류**: `extract` 는 값+위치 추출(업태·종목처럼 값이 여러 개면 항목별 박스),
+  `verify` 는 pass·fail·uncertain 판정 + 근거 위치(서명 유효성 등). 파일 화면의
+  "규칙 제안 받기"를 누르면 VLM 이 그 문서에서 점검할 규칙을 제안합니다.
+- **골든셋**: 검토 화면에서 확정한 판정이 `golden_verdicts` 에 쌓입니다 (#2 골든 러너의 정답 데이터).
+
+```
+review_app.py     # 검토 서버: 업로드·검토 UI + API (포트 8766)
+detect_fields.py  # 유형 판별 + 필드 탐지 (Gemini box_2d, detect-v2 프롬프트)
+db.py             # PostgreSQL 연결·마이그레이션·시드 (koica-cts 팩)
+schema.sql        # packs/doc_types/rules/submissions/files/pages/detections/golden_verdicts
+start_review.sh   # 로컬 원커맨드 실행 (postgres 컨테이너 자동 기동)
+```

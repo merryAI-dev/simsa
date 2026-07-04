@@ -101,15 +101,22 @@ def _gemini(parts: list[dict], api_key: str, model: str = MODEL) -> dict:
         "contents": [{"parts": parts}],
         "generationConfig": {"response_mime_type": "application/json", "temperature": 0},
     }
-    resp = requests.post(
-        f"{API_ROOT}/{model}:generateContent", json=body, timeout=180,
-        headers={"Content-Type": "application/json", "X-goog-api-key": api_key},
-    )
-    resp.raise_for_status()
-    result = json.loads(resp.json()["candidates"][0]["content"]["parts"][0]["text"])
-    if isinstance(result, list):  # Gemini 가 배열로 감싸는 변덕 대응
-        result = result[0] if result else {}
-    return result
+    last_err: Exception | None = None
+    for _ in range(2):  # 깨진 JSON 응답은 1회 재시도 (알려진 Gemini 변덕)
+        resp = requests.post(
+            f"{API_ROOT}/{model}:generateContent", json=body, timeout=180,
+            headers={"Content-Type": "application/json", "X-goog-api-key": api_key},
+        )
+        resp.raise_for_status()
+        try:
+            result = json.loads(resp.json()["candidates"][0]["content"]["parts"][0]["text"])
+        except (json.JSONDecodeError, KeyError, IndexError) as e:
+            last_err = e
+            continue
+        if isinstance(result, list):  # Gemini 가 배열로 감싸는 변덕 대응
+            result = result[0] if result else {}
+        return result
+    raise RuntimeError(f"Gemini 응답 파싱 실패 ({model}): {last_err}")
 
 
 def _pdf_part(pdf: Path) -> dict:

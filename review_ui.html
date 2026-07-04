@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="ko"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>simsa — 심사 검토</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
+<script>tailwind.config={theme:{extend:{fontFamily:{sans:['Pretendard','-apple-system','sans-serif']}}}}</script>
+<style>
+body{font-family:Pretendard,-apple-system,sans-serif}
+.dbox{position:absolute;border:2px solid #F04452;border-radius:4px;cursor:pointer}
+.dbox.correct{border-color:#00A05C}.dbox.wrong{border-color:#B0B8C1;border-style:dashed}
+.dbox .tag{position:absolute;top:-22px;left:-2px;background:#FDEDEE;color:#D6363B;font-size:11px;font-weight:700;padding:2px 7px;border-radius:6px;white-space:nowrap}
+.dbox.correct .tag{background:#E7F7EF;color:#00A05C}.dbox.wrong .tag{background:#F2F4F6;color:#8B95A1}
+::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-thumb{background:#D1D6DB;border-radius:3px}
+</style></head>
+<body class="bg-[#F2F4F6] text-[#191F28] antialiased">
+<header class="bg-white/90 backdrop-blur sticky top-0 z-20 border-b border-[#E5E8EB]">
+  <div class="max-w-[1280px] mx-auto px-6 h-16 flex items-center gap-4">
+    <a href="#home" class="text-[21px] font-extrabold tracking-tight">simsa<span class="text-[#3182F6]">.</span></a>
+    <span id="crumb" class="text-[13px] text-[#8B95A1] truncate"></span>
+    <nav class="ml-auto flex gap-1 shrink-0">
+      <a href="#home" class="px-4 py-2 rounded-full text-[13px] font-bold text-[#4E5968] hover:bg-[#F2F4F6]">홈</a>
+      <a href="#golden" class="px-4 py-2 rounded-full text-[13px] font-bold text-[#4E5968] hover:bg-[#F2F4F6]">골든셋 검사</a>
+    </nav>
+  </div>
+</header>
+<main id="main" class="max-w-[1280px] mx-auto px-6 py-8"></main>
+<script>
+const $=s=>document.querySelector(s);
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const api=async(url,opt)=>{const r=await fetch(url,opt);if(!r.ok)throw new Error(await r.text());return r.json()};
+let pollTimer=null;
+
+const BTN='px-4 py-2.5 rounded-xl text-[13px] font-bold transition active:scale-[0.98] disabled:opacity-40';
+const P=`${BTN} bg-[#3182F6] text-white hover:bg-[#1B64DA]`;
+const G=`${BTN} bg-[#F2F4F6] text-[#4E5968] hover:bg-[#E5E8EB]`;
+const SM='px-3 py-1.5 rounded-lg text-[12px] font-bold transition active:scale-[0.97]';
+const PS=`${SM} bg-[#3182F6] text-white`;
+const GS=`${SM} bg-[#F2F4F6] text-[#4E5968] hover:bg-[#E5E8EB]`;
+const INP='w-full px-3.5 py-2.5 rounded-xl border border-[#E5E8EB] text-[14px] bg-white focus:outline-none focus:border-[#3182F6] focus:ring-2 focus:ring-[#3182F6]/15';
+const card=(inner,extra='')=>`<div class="bg-white rounded-[20px] p-6 shadow-[0_1px_2px_rgba(0,0,0,0.04)] ${extra}">${inner}</div>`;
+const h2=t=>`<h2 class="text-[17px] font-bold mb-1.5 flex items-center gap-2 flex-wrap">${t}</h2>`;
+const hint=t=>`<p class="text-[13px] text-[#8B95A1] leading-relaxed mb-4">${t}</p>`;
+
+const BADGE={pass:'bg-[#E7F7EF] text-[#00A05C]',detected:'bg-[#E7F7EF] text-[#00A05C]',ready:'bg-[#E7F7EF] text-[#00A05C]',done:'bg-[#E7F7EF] text-[#00A05C]',
+fail:'bg-[#FDEDEE] text-[#F04452]',error:'bg-[#FDEDEE] text-[#F04452]',
+uncertain:'bg-[#FFF4E5] text-[#E8730A]',
+processing:'bg-[#E8F3FF] text-[#3182F6]',running:'bg-[#E8F3FF] text-[#3182F6]',pending:'bg-[#E8F3FF] text-[#3182F6]',
+skipped:'bg-[#F2F4F6] text-[#8B95A1]',golden:'bg-[#F0EBFD] text-[#7048E8]'};
+const badge=(t,k)=>`<span class="inline-flex px-2.5 py-1 rounded-full text-[11px] font-bold leading-none ${BADGE[k]||BADGE.skipped}">${esc(t)}</span>`;
+
+const durS=t=>Array.isArray(t)&&t.length===2?Math.max(0,t[1]-t[0]):null;
+const fmtD=s=>s==null?'':(s<1?Math.round(s*1000)+'ms':s<60?s.toFixed(1)+'초':Math.floor(s/60)+'분 '+Math.round(s%60)+'초');
+
+const NODE={done:'border-[#00A05C]/25 bg-[#E7F7EF] text-[#00A05C]',running:'border-[#3182F6]/30 bg-[#E8F3FF] text-[#3182F6] animate-pulse',
+error:'border-[#F04452]/25 bg-[#FDEDEE] text-[#F04452]',pending:'border-[#E5E8EB] bg-white text-[#B0B8C1]',skipped:'border-[#E5E8EB] bg-[#F2F4F6] text-[#8B95A1]'};
+const dagNode=(label,state,sub)=>`<div class="flex flex-col items-center justify-center px-3 py-1.5 rounded-xl border ${NODE[state]||NODE.pending} min-w-[80px]">
+  <span class="text-[12px] font-bold leading-tight whitespace-nowrap">${esc(label)}</span>
+  <span class="text-[10.5px] opacity-80 leading-tight h-[13px]">${esc(sub||'')}</span></div>`;
+const dagArrow='<svg width="24" height="8" class="shrink-0 text-[#D1D6DB] mx-0.5"><line x1="0" y1="4" x2="16" y2="4" stroke="currentColor" stroke-width="1.5"/><path d="M16 0.5 L23 4 L16 7.5 Z" fill="currentColor"/></svg>';
+const dag=nodes=>`<div class="flex items-center flex-wrap gap-y-2">${nodes.join(dagArrow)}</div>`;
+
+function fileDag(f){
+  const t=f.timings||{};
+  if(f.status==='skipped')return dag([dagNode('변환','done',''),dagNode('원본 보존','skipped','')]);
+  const detState=f.status==='detected'?'done':f.status==='error'?'error':'running';
+  return dag([
+    dagNode('변환','done',''),
+    dagNode('렌더',t.render?'done':(detState==='running'?'running':'skipped'),t.render?fmtD(durS(t.render)):'캐시'),
+    dagNode('VLM 탐지',detState,t.detect?fmtD(durS(t.detect)):''),
+    dagNode(f.status==='error'?'오류':'검토 대기',detState,'')
+  ]);
+}
+
+function subFlow(d){
+  const t=d.timings||{};
+  const act=d.files.filter(f=>f.status!=='skipped');
+  const done=act.filter(f=>f.status==='detected').length;
+  const detS=d.status==='processing'?'running':act.some(f=>f.status==='error')?'error':act.length&&done===act.length?'done':act.length?'running':'pending';
+  return dag([
+    dagNode('업로드','done',''),
+    dagNode('문서 변환',t.convert?'done':(d.status==='processing'?'running':'pending'),fmtD(durS(t.convert))),
+    dagNode('파일 탐지 (flash)',detS,act.length?`${done}/${act.length} 파일`:''),
+    dagNode('종합 검사 (pro)',t.checks?'done':(d.status==='processing'?'pending':(d.checks&&d.checks.length?'done':'pending')),fmtD(durS(t.checks)))
+  ]);
+}
+
+function gantt(d){
+  const t=d.timings||{};let origin=Infinity,end=0;
+  const track=a=>{if(Array.isArray(a)&&a.length===2){origin=Math.min(origin,a[0]);end=Math.max(end,a[1])}};
+  track(t.convert);track(t.checks);
+  d.files.forEach(f=>{const ft=f.timings||{};track(ft.render);track(ft.detect)});
+  if(!isFinite(origin)||end<=origin)return '';
+  const span=end-origin;
+  const bar=(a,c,tip)=>Array.isArray(a)&&a.length===2?`<div class="absolute h-full rounded-full ${c}" title="${esc(tip||'')}" style="left:${((a[0]-origin)/span*100).toFixed(2)}%;width:${Math.max((a[1]-a[0])/span*100,0.9).toFixed(2)}%"></div>`:'';
+  const row=(label,bars,dur)=>`<div class="flex items-center gap-3 py-[3px]">
+    <span class="w-52 shrink-0 truncate text-[12px] text-[#4E5968] text-right" title="${esc(label)}">${esc(label)}</span>
+    <div class="relative flex-1 h-3.5 bg-[#F2F4F6] rounded-full overflow-hidden">${bars}</div>
+    <span class="w-16 shrink-0 text-[11px] text-[#8B95A1]">${dur||''}</span></div>`;
+  const rows=[row('문서 변환',bar(t.convert,'bg-[#B0B8C1]','변환'),fmtD(durS(t.convert)))];
+  d.files.filter(f=>f.status!=='skipped').forEach(f=>{const ft=f.timings||{};
+    const total=(durS(ft.render)||0)+(durS(ft.detect)||0);
+    rows.push(row(f.filename,bar(ft.render,'bg-[#FFC342]','렌더')+bar(ft.detect,'bg-[#3182F6]','VLM 탐지'),total?fmtD(total):''));});
+  rows.push(row('종합 검사 (pro)',bar(t.checks,'bg-[#7048E8]','종합 검사'),fmtD(durS(t.checks))));
+  const leg=(c,t2)=>`<span class="inline-flex items-center gap-1.5 text-[11px] text-[#8B95A1]"><span class="w-2.5 h-2.5 rounded ${c}"></span>${t2}</span>`;
+  return card(h2('처리 타임라인')+
+    `<div class="flex gap-4 mb-3">${leg('bg-[#B0B8C1]','변환')}${leg('bg-[#FFC342]','렌더')}${leg('bg-[#3182F6]','VLM 탐지')}${leg('bg-[#7048E8]','종합 검사')}</div>`+
+    rows.join('')+
+    `<div class="flex justify-between pl-[220px] pr-[76px] text-[10px] text-[#B0B8C1] mt-1.5"><span>0초</span><span>${fmtD(span)}</span></div>`,'mb-5');
+}
+
+function route(){clearInterval(pollTimer);const h=location.hash||'#home';
+  if(h.startsWith('#sub/'))return viewSubmission(+h.slice(5));
+  if(h.startsWith('#file/'))return viewFile(+h.slice(6));
+  if(h==='#golden')return viewGolden();
+  viewHome()}
+window.addEventListener('hashchange',route);
+
+async function viewHome(){$('#crumb').textContent='';
+  const d=await api('/api/bootstrap');const pack=d.packs[0];
+  const fileRules=pack.rules.filter(r=>r.scope==='file'),subRules=pack.rules.filter(r=>r.scope==='submission');
+  $('#main').innerHTML=`<div class="grid lg:grid-cols-[420px_1fr] gap-5 items-start">
+  <section class="space-y-5">
+    ${card(h2('제출건 업로드')+`<form id="upform" class="space-y-3">
+      <div><label class="block text-[13px] font-bold text-[#4E5968] mb-1.5">심사 팩</label>
+        <select name="pack_id" class="${INP}">${d.packs.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></div>
+      <div><label class="block text-[13px] font-bold text-[#4E5968] mb-1.5">심사 기준일 <span class="text-[#F04452]">*</span></label>
+        <input type="date" name="base_date" id="basedate" class="${INP}" required>
+        <p class="text-[12px] text-[#8B95A1] mt-1.5">발급일 3개월 이내 같은 <b>모든 날짜 판정의 기준</b>이 되는 날짜예요.</p></div>
+      <div><label class="block text-[13px] font-bold text-[#4E5968] mb-1.5">제출 ZIP</label>
+        <input name="zip" type="file" accept=".zip" required class="block w-full text-[13px] text-[#4E5968] file:mr-3 file:px-4 file:py-2.5 file:rounded-xl file:border-0 file:bg-[#E8F3FF] file:text-[#3182F6] file:text-[13px] file:font-bold file:cursor-pointer"></div>
+      <button class="${P} w-full py-3">업로드하고 탐지 시작</button>
+      <p class="text-[12px] text-[#8B95A1]">같은 파일 + 같은 규칙이면 캐시를 써서 API 호출이 없어요.</p></form>`)}
+    ${card(h2('제출건')+`<div id="subs" class="space-y-2.5">불러오는 중…</div>`)}
+  </section>
+  <section class="space-y-5">
+    ${card(h2('문서 유형 레지스트리 — '+esc(pack.name))+
+      hint('"어떤 서류가 들어와야 하는가"의 기준. 내용 기반 VLM 판별이 주, 파일명 힌트는 보조예요. 버튼으로 필수↔선택을 바꿀 수 있어요.')+
+      `<div class="divide-y divide-[#F2F4F6]">${pack.doc_types.map(t=>`
+        <div class="flex items-center gap-3 py-2.5">
+          <button class="${t.required?'bg-[#3182F6] text-white':'bg-[#F2F4F6] text-[#8B95A1]'} ${SM} shrink-0 w-[52px]" onclick="toggleDocType(${t.id})">${t.required?'필수':'선택'}</button>
+          <div class="min-w-0 flex-1"><p class="text-[14px] font-semibold truncate">${esc(t.name)}</p>
+            <p class="text-[12px] text-[#8B95A1] truncate">${esc((t.filename_hints||[]).join(', ')||'힌트 없음')}${t.description?' · '+esc(t.description):''}</p></div>
+          <button class="${GS} shrink-0" onclick="delDocType(${t.id})">삭제</button></div>`).join('')}</div>
+      <form id="dtform" class="flex gap-2 mt-4 flex-wrap">
+        <input name="name" placeholder="유형 이름" required class="${INP} !w-[150px]">
+        <label class="flex items-center gap-1.5 text-[13px] font-semibold text-[#4E5968]"><input type="checkbox" name="required" checked class="accent-[#3182F6] w-4 h-4"> 필수</label>
+        <input name="filename_hints" placeholder="파일명 힌트 (쉼표)" class="${INP} !w-[150px]">
+        <input name="description" placeholder="설명 (선택)" class="${INP} !w-auto flex-1 min-w-[120px]">
+        <button class="${PS}">추가</button></form>`)}
+    ${card(h2('파일 탐지 규칙')+
+      hint('파일 하나 안에서 VLM이 값·위치를 탐지해요. extract는 값 추출, verify는 pass/fail/uncertain 판정. 규칙을 바꾸면 파일 화면에서 재탐지하세요.')+
+      `<div class="divide-y divide-[#F2F4F6]">${fileRules.map(r=>`
+        <div class="flex items-center gap-3 py-2.5">
+          ${badge(r.rule_type,r.rule_type==='verify'?'uncertain':'skipped')}
+          <span class="text-[13px] text-[#8B95A1] w-[130px] shrink-0 truncate">${esc(r.doc_type)}</span>
+          <div class="min-w-0 flex-1"><p class="text-[14px] font-semibold">${esc(r.field)}</p>
+            ${r.instruction?`<p class="text-[12px] text-[#8B95A1] truncate">${esc(r.instruction)}</p>`:''}</div>
+          <button class="${GS} shrink-0" onclick="delRule(${r.id})">삭제</button></div>`).join('')}</div>
+      <form id="ruleform" class="flex gap-2 mt-4 flex-wrap">
+        <select name="rule_type" class="${INP} !w-[100px]"><option value="extract">extract</option><option value="verify">verify</option></select>
+        <input name="doc_type" placeholder="문서 유형 (또는 *)" required class="${INP} !w-[140px]">
+        <input name="field" placeholder="필드" required class="${INP} !w-[130px]">
+        <input name="instruction" placeholder="설명 (선택)" class="${INP} !w-auto flex-1 min-w-[120px]">
+        <button class="${PS}">추가</button></form>`)}
+    ${card(h2('종합 검사 규칙 <span class="text-[12px] font-bold text-[#7048E8] bg-[#F0EBFD] px-2 py-0.5 rounded-full">제출건 단위 · pro</span>')+
+      hint('파일별 추출이 끝난 값들을 놓고 서류를 가로질러 평가해요. 자연어로 쓰면 됩니다. PDF를 다시 읽지 않아요.')+
+      `<div class="divide-y divide-[#F2F4F6]">${subRules.map(r=>`
+        <div class="flex items-start gap-3 py-2.5">
+          <div class="min-w-0 flex-1"><p class="text-[14px] font-semibold">${esc(r.field)}</p>
+            <p class="text-[12px] text-[#8B95A1]">${esc(r.instruction)}</p></div>
+          <button class="${GS} shrink-0" onclick="delRule(${r.id})">삭제</button></div>`).join('')}</div>
+      <form id="subruleform" class="mt-4 space-y-2">
+        <input name="field" placeholder="규칙 이름 (예: 대표자·서명자 일치)" required class="${INP}">
+        <textarea name="instruction" placeholder="규칙 내용을 자연어로 — 무엇을 어떤 기준으로 판정할지" required rows="2" class="${INP}"></textarea>
+        <button class="${PS}">종합 규칙 추가</button></form>`)}
+  </section></div>`;
+  $('#basedate').value=new Date().toISOString().slice(0,10);
+  $('#ruleform').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);
+    await api('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pack_id:pack.id,rule_type:f.get('rule_type'),doc_type:f.get('doc_type'),field:f.get('field'),instruction:f.get('instruction')})});viewHome()});
+  $('#subruleform').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);
+    await api('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pack_id:pack.id,rule_type:'verify',scope:'submission',doc_type:'종합',field:f.get('field'),instruction:f.get('instruction')})});viewHome()});
+  $('#dtform').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);
+    await api('/api/doc_types',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pack_id:pack.id,name:f.get('name'),required:!!f.get('required'),filename_hints:f.get('filename_hints'),description:f.get('description')})});viewHome()});
+  $('#upform').addEventListener('submit',async e=>{e.preventDefault();e.target.querySelector('button').disabled=true;
+    const j=await api('/api/submissions',{method:'POST',body:new FormData(e.target)});location.hash='#sub/'+j.id});
+  renderSubs();pollTimer=setInterval(renderSubs,3000)}
+
+async function renderSubs(){const subs=await api('/api/submissions');const el=$('#subs');if(!el)return;
+  el.innerHTML=subs.length?subs.map(s=>`<div class="rounded-2xl border border-[#F2F4F6] hover:border-[#3182F6]/40 hover:bg-[#F9FAFB] p-4 cursor-pointer transition" onclick="location.hash='#sub/${s.id}'">
+    <div class="flex items-center justify-between gap-2"><p class="text-[14px] font-bold truncate">${esc(s.name)}</p>${badge(s.status,s.status)}</div>
+    <p class="text-[12px] text-[#8B95A1] mt-1">기준일 ${esc(s.base_date||'')} · 파일 ${s.file_count} · 탐지 ${s.detection_count} · 골든 ${s.golden_count}</p>
+    ${s.error?`<p class="text-[12px] text-[#F04452] mt-1 truncate">${esc(s.error)}</p>`:''}</div>`).join('')
+  :'<p class="text-[13px] text-[#8B95A1]">아직 없어요. ZIP을 올려보세요.</p>'}
+
+async function viewSubmission(id){const d=await api('/api/submissions/'+id);
+  $('#crumb').textContent='› '+d.name;
+  const missing=d.checklist.filter(c=>c.required&&!c.present);
+  const clRow=c=>`<div class="flex items-center justify-between py-[5px]">
+    <span class="text-[13px] ${c.present?'text-[#191F28]':(c.required?'text-[#F04452] font-semibold':'text-[#B0B8C1]')}">
+      ${c.present?'<span class="text-[#00A05C] font-bold">✓</span>':(c.required?'✗':'–')} ${esc(c.name)}</span>
+    <span class="text-[12px] text-[#8B95A1]">${c.files.length?c.files.length+'건':''}</span></div>`;
+  const vb=v=>badge(v,v);
+  const checksHtml=(d.checks||[]).map(c=>`<div class="rounded-2xl border ${c.verdict==='fail'?'border-[#F04452]/25 bg-[#FDEDEE]/30':c.verdict==='uncertain'?'border-[#E8730A]/25 bg-[#FFF4E5]/30':'border-[#F2F4F6]'} p-4 ${c.feedback==='wrong'?'opacity-50':''}">
+    <div class="flex items-center gap-2 flex-wrap">${vb(c.verdict)}<b class="text-[14px]">${esc(c.name)}</b></div>
+    <p class="text-[13px] text-[#4E5968] mt-1.5 leading-relaxed">${esc(c.evidence)}</p>
+    ${(c.refs||[]).length?`<div class="mt-2 rounded-xl bg-[#F9FAFB] p-2.5 text-[11px] text-[#8B95A1] font-mono leading-relaxed">${c.refs.map(r=>esc((r.file||'')+' · '+(r.field||'')+' = '+(r.value||''))).join('<br>')}</div>`:''}
+    <div class="flex gap-1.5 mt-2.5">
+      <button class="${c.feedback==='correct'?PS:GS}" onclick="checkFeedback(${c.id},'correct',${d.id})">맞음</button>
+      <button class="${c.feedback==='wrong'?PS:GS}" onclick="checkFeedback(${c.id},'wrong',${d.id})">틀림</button></div></div>`).join('');
+  $('#main').innerHTML=`
+  ${card(`<div class="flex items-center gap-3 flex-wrap mb-4">
+      <h2 class="text-[19px] font-extrabold">${esc(d.name)}</h2>${badge(d.status,d.status)}
+      <span class="text-[13px] text-[#8B95A1]">심사 기준일 <b class="text-[#191F28]">${esc(d.base_date||'')}</b></span></div>`+subFlow(d),'mb-5')}
+  ${gantt(d)}
+  <div class="grid lg:grid-cols-[1fr_420px] gap-5 items-start">
+  <section class="space-y-3">
+    ${card(h2(`파일 ${d.files.length}건`)+`<div class="space-y-2.5">${d.files.map(f=>`
+      <div class="rounded-2xl border border-[#F2F4F6] hover:border-[#3182F6]/40 hover:bg-[#F9FAFB] p-4 cursor-pointer transition" onclick="location.hash='#file/${f.id}'">
+        <div class="flex items-center justify-between gap-2 mb-1">
+          <p class="text-[13.5px] font-bold truncate">${esc(f.filename)}</p>
+          <span class="flex gap-1.5 shrink-0">${f.golden_count?badge('골든 '+f.golden_count,'golden'):''}${badge(f.status,f.status)}</span></div>
+        <p class="text-[12px] text-[#8B95A1] mb-2.5">${esc(f.doc_type||'유형 미판별')}${f.status==='detected'&&!f.doc_type_registered?' '+badge('미등록 유형','uncertain'):''} · ${f.page_count}p · 탐지 ${f.detection_count}건${f.error?` · <span class="text-[#F04452]">${esc(f.error)}</span>`:''}</p>
+        ${fileDag(f)}</div>`).join('')}</div>`)}
+  </section>
+  <section class="space-y-5">
+    ${card(h2(`필수서류 완비 체크 ${missing.length?badge('필수 '+missing.length+'종 누락','fail'):badge('완비','pass')}`)+
+      `<p class="text-[12px] font-bold text-[#4E5968] mt-2 mb-1">필수</p>`+d.checklist.filter(c=>c.required).map(clRow).join('')+
+      (d.checklist.some(c=>!c.required)?`<p class="text-[12px] font-bold text-[#8B95A1] mt-3 mb-1">선택</p>`+d.checklist.filter(c=>!c.required).map(clRow).join(''):'')+
+      (d.unmatched_files.length?`<p class="text-[12px] text-[#8B95A1] mt-3"><b>어느 유형에도 안 잡힌 파일:</b> ${d.unmatched_files.map(esc).join(', ')}</p>`:''))}
+    ${card(h2('종합 검사 <span class="text-[12px] font-bold text-[#7048E8] bg-[#F0EBFD] px-2 py-0.5 rounded-full">pro</span>')+
+      hint('파일별 추출값을 텍스트로 놓고 서류를 가로질러 평가한 결과예요. 탐지를 정정했으면 다시 실행하세요.')+
+      `<button class="${G} w-full mb-3" id="checkbtn" onclick="runChecks(${d.id})">종합 검사 다시 실행</button>
+      <div class="space-y-2.5">${checksHtml||'<p class="text-[13px] text-[#8B95A1]">아직 결과 없음 — 탐지 완료 시 자동 실행돼요.</p>'}</div>`)}
+    ${card(h2('교차 탐지 현황')+hint('같은 필드에 값이 여러 종이면 표기 불일치 또는 오탐이에요. 틀림 처리한 탐지는 제외.')+
+      `<div class="space-y-2.5">${Object.entries(d.aggregation).map(([field,vals])=>{const multi=vals.length>1;
+        return `<div class="rounded-2xl border ${multi?'border-[#E8730A]/30 bg-[#FFF4E5]/30':'border-[#F2F4F6]'} p-3.5">
+          <div class="flex items-center justify-between"><b class="text-[13.5px]">${esc(field)}</b>
+            <span class="text-[12px] font-bold ${multi?'text-[#E8730A]':'text-[#8B95A1]'}">${multi?'값 '+vals.length+'종 — 확인 필요':(vals[0]?vals[0].n+'개 파일':'')}</span></div>
+          ${vals.map(v=>`<div class="flex justify-between text-[12.5px] mt-1"><span class="font-mono text-[#4E5968] truncate mr-2">${esc(v.val)}</span><span class="text-[#8B95A1] shrink-0">${v.n}개</span></div>`).join('')}</div>`}).join('')||'<p class="text-[13px] text-[#8B95A1]">탐지 결과 대기 중…</p>'}</div>`)}
+  </section></div>`;
+  if(d.status==='processing')pollTimer=setInterval(async()=>{viewSubmission(id)},3000)}
+
+let FD=null;
+async function viewFile(id){FD=await api('/api/files/'+id);
+  $('#crumb').innerHTML=`› <a href="#sub/${FD.submission_id}" class="hover:underline">${esc(FD.submission_name)}</a> › ${esc(FD.filename)}`;
+  const dets=FD.detections;
+  const pagesHtml=FD.pages.map(p=>{
+    const boxes=dets.filter(dd=>dd.page_no===p.page_no).map(dd=>{
+      const[y1,x1,y2,x2]=dd.box;
+      return `<div class="dbox ${esc(dd.feedback)}" id="box${dd.id}" onclick="focusDet(${dd.id})"
+        style="top:${y1/10}%;left:${x1/10}%;width:${(x2-x1)/10}%;height:${(y2-y1)/10}%"><span class="tag">${esc(dd.field)}</span></div>`}).join('');
+    return `<div class="relative rounded-2xl overflow-hidden border border-[#E5E8EB] bg-white mb-4">
+      <img src="/pageimg/${p.id}" loading="lazy" class="w-full block">${boxes}
+      <span class="absolute right-2.5 bottom-2 text-[11px] text-[#8B95A1] bg-white/80 px-1.5 rounded">p${p.page_no}</span></div>`}).join('');
+  const detsHtml=dets.map(dd=>`<div class="rounded-2xl border ${dd.feedback==='correct'?'border-[#00A05C]/30':dd.feedback==='wrong'?'border-[#E5E8EB] opacity-60':'border-[#F2F4F6]'} p-3.5" id="det${dd.id}">
+    <div class="flex items-center justify-between gap-2 flex-wrap">
+      <span class="flex items-center gap-2"><b class="text-[13.5px]">${esc(dd.field)}</b>${dd.verdict?badge(dd.verdict,dd.verdict):''}</span>
+      <span class="text-[11px] text-[#8B95A1]">p${dd.page_no} · ${(dd.confidence??0).toFixed(2)}</span></div>
+    <p class="font-mono text-[12.5px] text-[#4E5968] my-1.5 break-all">${esc(dd.value)}</p>
+    <div class="flex gap-1.5 items-center">
+      <button class="${dd.feedback==='correct'?PS:GS}" onclick="feedback(${dd.id},'correct')">맞음</button>
+      <button class="${dd.feedback==='wrong'?PS:GS}" onclick="feedback(${dd.id},'wrong')">틀림</button>
+      <input placeholder="정정 값" value="${esc(dd.corrected_value)}" onchange="feedback(${dd.id},'wrong',this.value)" class="${INP} !py-1.5 !text-[12px] flex-1"></div></div>`).join('');
+  const unregHtml=FD.status==='detected'&&!FD.doc_type_registered?`
+    <div class="rounded-2xl border border-[#E8730A]/30 bg-[#FFF4E5]/40 p-4 mb-3">
+      <p class="text-[13.5px] font-bold text-[#E8730A]">미등록 유형: ${esc(FD.doc_type||'미상')}</p>
+      <p class="text-[12.5px] text-[#8B95A1] my-1.5">${esc(FD.doc_type_evidence)}</p>
+      <button class="${PS}" onclick="registerDocType()">이 유형을 레지스트리에 등록</button></div>`:'';
+  $('#main').innerHTML=`<div class="grid lg:grid-cols-[1fr_440px] gap-5 items-start">
+  <section>${pagesHtml||card('<p class="text-[13px] text-[#8B95A1]">페이지 이미지 없음 (변환 안 된 파일)</p>')}</section>
+  <section class="lg:sticky lg:top-[76px] space-y-5">
+    ${card(h2(`탐지 ${dets.length}건 — ${esc(FD.doc_type||'유형 미판별')}`)+unregHtml+
+      `<div class="space-y-2.5 max-h-[46vh] overflow-auto pr-1">${detsHtml||'<p class="text-[13px] text-[#8B95A1]">탐지된 필드 없음</p>'}</div>
+      <button class="${G} w-full mt-3" onclick="suggestRules()" id="sugbtn">이 문서에서 점검할 규칙 제안 받기</button>
+      <div id="suggestions" class="space-y-2.5 mt-2.5"></div>`)}
+    ${card(h2(`골든셋 확정 ${FD.golden.length?badge('등록됨 · '+FD.golden.length+'필드','golden'):''}`)+
+      hint("'맞음' 표시(또는 정정 값 입력)된 탐지가 이 파일의 정답으로 저장돼요.")+
+      `<label class="block text-[13px] font-bold text-[#4E5968] mb-1.5">파일 판정</label>
+      <select id="gverdict" class="${INP}"><option value="pass">pass</option><option value="fail">fail</option><option value="uncertain">uncertain</option></select>
+      <label class="block text-[13px] font-bold text-[#4E5968] mt-3 mb-1.5">메모</label>
+      <input id="gnote" placeholder="적발 사항 등 (선택)" class="${INP}">
+      <button class="${P} w-full mt-4" onclick="saveGolden()">골든셋으로 저장</button>
+      <button class="${G} w-full mt-2" onclick="redetect()">현재 규칙으로 재탐지</button>`)}
+  </section></div>`;
+  if(FD.golden.length){$('#gverdict').value=FD.golden[0].verdict;$('#gnote').value=FD.golden[0].note}}
+
+function focusDet(id){const el=document.getElementById('det'+id);if(el){el.scrollIntoView({block:'center',behavior:'smooth'});el.style.outline='2px solid #3182F6';setTimeout(()=>el.style.outline='',900)}}
+async function feedback(id,fb,cv){const dd=FD.detections.find(x=>x.id===id);
+  if(cv===undefined&&dd.feedback===fb)fb='';
+  await api('/api/detections/'+id+'/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({feedback:fb,corrected_value:cv??dd.corrected_value})});
+  viewFile(FD.id)}
+async function saveGolden(){
+  const items=FD.detections.filter(dd=>dd.feedback==='correct'||dd.corrected_value)
+    .map(dd=>({field:dd.field,expected_value:dd.verdict?dd.verdict:(dd.corrected_value||dd.value),source_detection_id:dd.id}));
+  if(!items.length&&!confirm('맞음 표시된 탐지가 없습니다. 판정만 저장할까요?'))return;
+  await api('/api/files/'+FD.id+'/golden',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({verdict:$('#gverdict').value,note:$('#gnote').value,items})});
+  viewFile(FD.id)}
+async function redetect(){if(!confirm('현재 규칙으로 이 파일을 다시 탐지합니다. 피드백 없는 탐지는 교체돼요.'))return;
+  await api('/api/files/'+FD.id+'/redetect',{method:'POST'});
+  const wait=setInterval(async()=>{const f=await api('/api/files/'+FD.id);if(f.status!=='pending'){clearInterval(wait);viewFile(FD.id)}},2000)}
+async function registerDocType(){const hints=prompt('파일명 힌트 (쉼표 구분, 선택)','')??'';
+  await api('/api/doc_types',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({pack_id:FD.pack_id,name:FD.doc_type,required:false,filename_hints:hints,description:FD.doc_type_evidence})});
+  alert('등록됐어요. 재탐지하면 등록 유형으로 판별됩니다.');viewFile(FD.id)}
+let SUG=[];
+async function suggestRules(){const btn=$('#sugbtn');btn.disabled=true;btn.textContent='VLM이 문서를 읽는 중…';
+  try{const r=await api('/api/files/'+FD.id+'/suggest_rules',{method:'POST'});SUG=r.suggestions;
+    $('#suggestions').innerHTML=SUG.length?SUG.map((s,i)=>`<div class="rounded-2xl border border-[#F2F4F6] p-3.5" id="sug${i}">
+      <div class="flex items-center justify-between gap-2">
+        <span class="flex items-center gap-2">${badge(s.rule_type,s.rule_type==='verify'?'uncertain':'skipped')}<b class="text-[13.5px]">${esc(s.field)}</b></span>
+        <button class="${PS}" onclick="addSuggested(${i})">추가</button></div>
+      <p class="text-[12.5px] text-[#8B95A1] mt-1.5">${esc(s.instruction)}<br><i>왜: ${esc(s.why)}</i></p></div>`).join('')
+      :'<p class="text-[13px] text-[#8B95A1]">제안할 규칙이 없대요.</p>'}
+  finally{btn.disabled=false;btn.textContent='이 문서에서 점검할 규칙 제안 받기'}}
+async function addSuggested(i){const s=SUG[i];
+  await api('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({pack_id:FD.pack_id,rule_type:s.rule_type,doc_type:s.doc_type,field:s.field,instruction:s.instruction})});
+  document.getElementById('sug'+i).style.opacity=.4;document.querySelector('#sug'+i+' button').textContent='추가됨'}
+async function delRule(id){if(!confirm('규칙을 삭제할까요?'))return;await api('/api/rules/'+id,{method:'DELETE'});viewHome()}
+async function delDocType(id){if(!confirm('문서 유형을 삭제할까요?'))return;await api('/api/doc_types/'+id,{method:'DELETE'});viewHome()}
+async function toggleDocType(id){await api('/api/doc_types/'+id+'/toggle',{method:'POST'});viewHome()}
+async function checkFeedback(id,fb,subId){await api('/api/checks/'+id+'/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({feedback:fb})});viewSubmission(subId)}
+async function runChecks(subId){const btn=$('#checkbtn');btn.disabled=true;btn.textContent='pro가 추출값을 검토하는 중…';
+  await api('/api/submissions/'+subId+'/check',{method:'POST'});
+  setTimeout(()=>viewSubmission(subId),12000)}
+
+async function viewGolden(){$('#crumb').textContent='› 골든셋 검사';
+  const runs=await api('/api/golden_runs');
+  const runItem=r=>`<div class="rounded-2xl border border-[#F2F4F6] hover:border-[#3182F6]/40 p-4 cursor-pointer transition" onclick="showRun(${r.id})">
+    <div class="flex items-center justify-between"><b class="text-[14px]">검사 #${r.id}</b>
+      ${r.status==='done'?badge(`${r.matched}/${r.total} 일치`,r.matched===r.total?'pass':'fail'):badge(r.status,r.status)}</div>
+    <p class="text-[12px] text-[#8B95A1] mt-1">${esc((r.created_at||'').slice(0,19).replace('T',' '))}</p></div>`;
+  $('#main').innerHTML=`<div class="grid lg:grid-cols-[400px_1fr] gap-5 items-start">
+  <section>${card(h2('골든셋 검사 <span class="text-[12px] font-bold text-[#7048E8] bg-[#F0EBFD] px-2 py-0.5 rounded-full">#2 골든 러너</span>')+
+    hint('검토 화면에서 확정한 정답 파일을 <b>현재 규칙으로 다시 탐지</b>해 정답과 대조해요. 규칙·프롬프트를 바꾼 뒤 돌리면 회귀를 바로 잡아냅니다. 규칙이 같으면 캐시라 비용 0.')+
+    `<button class="${P} w-full py-3" onclick="startGolden()" id="grunbtn">지금 검사 실행</button>
+    <h2 class="text-[15px] font-bold mt-5 mb-2.5">실행 이력</h2>
+    <div id="runlist" class="space-y-2.5">${runs.map(runItem).join('')||'<p class="text-[13px] text-[#8B95A1]">아직 실행한 검사가 없어요.</p>'}</div>`)}</section>
+  <section>${card(`<div id="rundetail"><p class="text-[13px] text-[#8B95A1]">검사를 실행하거나 이력을 선택하면 결과가 여기 표시돼요.</p></div>`)}</section></div>`;
+  if(runs[0])showRun(runs[0].id)}
+async function showRun(id){const d=await api('/api/golden_runs/'+id);const el=$('#rundetail');if(!el)return;
+  if(d.status==='running'){el.innerHTML='<p class="text-[13px] text-[#3182F6] font-semibold animate-pulse">검사 실행 중… (규칙이 바뀐 파일은 VLM 재호출)</p>';
+    clearInterval(pollTimer);pollTimer=setInterval(()=>showRun(id),2500);return}
+  clearInterval(pollTimer);
+  if(d.status==='error'){el.innerHTML=`<p class="text-[13px] text-[#F04452]">실행 실패: ${esc((d.results[0]||{}).error||'')}</p>`;return}
+  const byFile={};(d.results||[]).forEach(r=>{(byFile[r.filename]=byFile[r.filename]||[]).push(r)});
+  const pct=d.total?Math.round(d.matched/d.total*100):0;
+  el.innerHTML=h2(`검사 #${d.id} 결과 ${badge(`${d.matched}/${d.total} 일치 (${pct}%)`,d.matched===d.total?'pass':'fail')}`)+
+    Object.entries(byFile).map(([fn,rows])=>`<div class="rounded-2xl border border-[#F2F4F6] p-4 mt-3">
+      <p class="text-[13.5px] font-bold mb-2">${esc(fn)}</p>
+      <table class="w-full text-[12.5px]"><thead><tr class="text-left text-[#8B95A1]"><th class="w-6 pb-1.5"></th><th class="pb-1.5">필드</th><th class="pb-1.5">정답</th><th class="pb-1.5">이번 탐지</th></tr></thead><tbody>
+      ${rows.map(r=>`<tr class="${r.ok?'':'bg-[#FDEDEE]/50'}"><td class="py-1">${r.ok?'<span class="text-[#00A05C] font-bold">✓</span>':'<span class="text-[#F04452] font-bold">✗</span>'}</td>
+        <td class="py-1 font-semibold pr-2">${esc(r.field)}</td>
+        <td class="py-1 font-mono text-[#4E5968] pr-2">${esc(r.expected)}</td>
+        <td class="py-1 font-mono text-[#4E5968]">${r.got.map(esc).join('<br>')||'<span class="text-[#8B95A1]">(미탐지)</span>'}</td></tr>`).join('')}
+      </tbody></table></div>`).join('')}
+async function startGolden(){const btn=$('#grunbtn');btn.disabled=true;
+  try{const r=await api('/api/golden_runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pack_id:1})});
+    showRun(r.id);const runs=await api('/api/golden_runs');
+    $('#runlist').innerHTML=runs.map(r2=>`<div class="rounded-2xl border border-[#F2F4F6] p-4 cursor-pointer" onclick="showRun(${r2.id})">
+      <div class="flex items-center justify-between"><b class="text-[14px]">검사 #${r2.id}</b>
+        ${r2.status==='done'?badge(`${r2.matched}/${r2.total} 일치`,r2.matched===r2.total?'pass':'fail'):badge(r2.status,r2.status)}</div>
+      <p class="text-[12px] text-[#8B95A1] mt-1">${esc((r2.created_at||'').slice(0,19).replace('T',' '))}</p></div>`).join('')}
+  catch(e){alert(e.message)}
+  finally{btn.disabled=false}}
+route();
+</script></body></html>

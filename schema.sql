@@ -123,3 +123,6 @@ ALTER TABLE rules ADD COLUMN IF NOT EXISTS scope text NOT NULL DEFAULT 'file';  
 ALTER TABLE detections ADD COLUMN IF NOT EXISTS verdict text NOT NULL DEFAULT '';          -- verify 규칙: pass | fail | uncertain
 ALTER TABLE files ADD COLUMN IF NOT EXISTS doc_type_registered boolean NOT NULL DEFAULT false;
 ALTER TABLE files ADD COLUMN IF NOT EXISTS doc_type_evidence text NOT NULL DEFAULT '';
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS base_date date NOT NULL DEFAULT CURRENT_DATE;  -- 심사 기준일 (날짜 판정 기준)
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS timings jsonb NOT NULL DEFAULT '{}';           -- {convert:[t0,t1], checks:[t0,t1]}
+ALTER TABLE files ADD COLUMN IF NOT EXISTS timings jsonb NOT NULL DEFAULT '{}';                 -- {render:[t0,t1], detect:[t0,t1]}

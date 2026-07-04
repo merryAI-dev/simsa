@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from email.parser import BytesParser
 from email.policy import default
 from http import HTTPStatus
@@ -30,280 +31,7 @@ from vlm_screen import load_api_key
 BASE = Path(__file__).parent
 DATA = BASE / "data/review"
 
-INDEX_HTML = """<!doctype html>
-<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>simsa 심사 검토</title><style>
-body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f6f7f9;color:#17202a}
-.wrap{max-width:1280px;margin:0 auto;padding:20px}header{background:white;border-bottom:1px solid #d9dee7}
-header .wrap{display:flex;align-items:center;gap:14px;padding-top:14px;padding-bottom:14px}
-h1{font-size:20px;margin:0}h1 a{color:inherit;text-decoration:none}h2{font-size:15px;margin:0 0 12px}
-main{display:grid;grid-template-columns:440px 1fr;gap:18px;align-items:start}
-.card{background:white;border:1px solid #d9dee7;border-radius:8px;padding:16px;margin-bottom:18px}
-label{display:block;margin:12px 0 6px;font-weight:700;font-size:13px}
-input,select,button,textarea{border-radius:6px;font-size:13px;box-sizing:border-box}
-input,select,textarea{border:1px solid #d9dee7;padding:7px;width:100%}
-button{border:0;background:#146c5f;color:white;font-weight:700;cursor:pointer;padding:8px 12px}
-button.ghost{background:white;color:#17202a;border:1px solid #d9dee7}button.sm{padding:4px 8px;font-size:12px}
-button:disabled{background:#98a2b3}
-table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px solid #eef1f5;padding:7px 6px;text-align:left;vertical-align:top}
-.hint{color:#667085;font-size:12px;line-height:1.5}.row{display:flex;gap:8px;align-items:center}
-.badge{display:inline-block;border-radius:999px;padding:2px 9px;font-size:11px;font-weight:700}
-.b-ready,.b-detected,.b-pass{background:#e5f5ec;color:#087443}.b-processing{background:#fff3e6;color:#9a3412}
-.b-error,.b-fail{background:#fde8e8;color:#b42318}.b-skipped{background:#eef1f5;color:#667085}
-.b-uncertain{background:#fff8e1;color:#92400e}.b-golden{background:#ede9fe;color:#5b21b6}
-.item{border:1px solid #eef1f5;border-radius:8px;padding:10px;margin-bottom:8px;cursor:pointer}
-.item:hover{border-color:#146c5f}.item.active{border-color:#146c5f;background:#f0faf7}
-.pagewrap{position:relative;margin-bottom:14px;border:1px solid #d9dee7;border-radius:6px;overflow:hidden}
-.pagewrap img{width:100%;display:block}
-.dbox{position:absolute;border:2px solid #e24b4a;border-radius:2px;cursor:pointer}
-.dbox.correct{border-color:#087443}.dbox.wrong{border-color:#98a2b3;border-style:dashed}
-.dbox .tag{position:absolute;top:-20px;left:-2px;background:#fde8e8;color:#791f1f;font-size:11px;font-weight:700;padding:1px 6px;border-radius:3px;white-space:nowrap}
-.dbox.correct .tag{background:#e5f5ec;color:#087443}.dbox.wrong .tag{background:#eef1f5;color:#667085}
-.det{border:1px solid #eef1f5;border-radius:8px;padding:10px;margin-bottom:8px}
-.det .val{font-family:ui-monospace,monospace;font-size:13px;margin:4px 0}
-.det.correct{border-color:#087443}.det.wrong{border-color:#98a2b3;opacity:.75}
-.agg-val{display:flex;justify-content:space-between;font-size:13px;padding:3px 0}
-.warn{color:#b42318;font-weight:700}
-@media(max-width:960px){main{grid-template-columns:1fr}}
-</style></head><body>
-<header><div class="wrap"><h1><a href="#home">simsa 심사 검토</a></h1><span class="hint" id="crumb"></span>
-<a href="#golden" style="margin-left:auto;font-size:13px;font-weight:700;color:#146c5f;text-decoration:none">골든셋 검사</a></div></header>
-<div class="wrap"><main id="main"></main></div>
-<script>
-const $=s=>document.querySelector(s);
-const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const api=async(url,opt)=>{const r=await fetch(url,opt);if(!r.ok)throw new Error(await r.text());return r.json()};
-let pollTimer=null;
-
-function route(){clearInterval(pollTimer);const h=location.hash||'#home';
-  if(h.startsWith('#sub/'))return viewSubmission(+h.slice(5));
-  if(h.startsWith('#file/'))return viewFile(+h.slice(6));
-  if(h==='#golden')return viewGolden();
-  viewHome()}
-window.addEventListener('hashchange',route);
-
-async function viewHome(){$('#crumb').textContent='';
-  const d=await api('/api/bootstrap');const pack=d.packs[0];
-  $('#main').innerHTML=`
-  <section><div class="card"><h2>제출건 업로드</h2><form id="upform">
-    <label>심사 팩</label><select name="pack_id">${d.packs.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
-    <label>제출 ZIP (제출건 폴더들이 든 ZIP)</label><input name="zip" type="file" accept=".zip" required>
-    <button style="margin-top:14px;width:100%">업로드 + 탐지 시작</button>
-    <p class="hint">파일마다 문서 유형을 판별하고 오른쪽 규칙표의 필드를 탐지합니다. 같은 파일+같은 규칙이면 캐시를 써서 API 호출이 없습니다.</p></form></div>
-  <div class="card"><h2>제출건</h2><div id="subs">불러오는 중…</div></div></section>
-  <section><div class="card"><h2>문서 유형 레지스트리 — ${esc(pack.name)}</h2>
-    <p class="hint">"어떤 서류가 들어와야 하는가"의 기준. 내용 기반 VLM 판별이 주, 파일명 힌트는 보조입니다. 필수 유형이 빠지면 제출건 화면에 경고가 뜹니다.</p>
-    <table><thead><tr><th>유형</th><th>필수/선택</th><th>파일명 힌트</th><th></th></tr></thead>
-    <tbody>${pack.doc_types.map(t=>`<tr><td><b>${esc(t.name)}</b><div class="hint">${esc(t.description)}</div></td>
-      <td><button class="sm ${t.required?'':'ghost'}" onclick="toggleDocType(${t.id})">${t.required?'필수':'선택'}</button></td>
-      <td class="hint">${esc((t.filename_hints||[]).join(', '))}</td>
-      <td><button class="ghost sm" onclick="delDocType(${t.id})">삭제</button></td></tr>`).join('')}</tbody></table>
-    <form id="dtform" class="row" style="margin-top:12px">
-      <input name="name" placeholder="유형 이름" required style="width:160px">
-      <label class="row" style="margin:0;white-space:nowrap;font-weight:400"><input type="checkbox" name="required" style="width:auto" checked> 필수</label>
-      <input name="filename_hints" placeholder="파일명 힌트 (쉼표 구분)" style="width:160px">
-      <input name="description" placeholder="설명 (선택)">
-      <button class="sm" style="white-space:nowrap">유형 추가</button></form></div>
-  <div class="card"><h2>파일 탐지 규칙</h2>
-    <p class="hint">파일 하나 안에서 VLM 이 값·위치를 탐지. extract 는 값 추출, verify 는 pass/fail/uncertain 판정(서명 유효성 등). 문서 유형 '*' 는 모든 문서에 적용. 규칙 변경 후엔 파일 화면에서 '재탐지'.</p>
-    <table><thead><tr><th>종류</th><th>문서 유형</th><th>필드</th><th>설명</th><th></th></tr></thead>
-    <tbody>${pack.rules.filter(r=>r.scope==='file').map(r=>`<tr><td><span class="badge ${r.rule_type==='verify'?'b-uncertain':'b-skipped'}">${esc(r.rule_type)}</span></td>
-      <td>${esc(r.doc_type)}</td><td><b>${esc(r.field)}</b></td><td class="hint">${esc(r.instruction)}</td>
-      <td><button class="ghost sm" onclick="delRule(${r.id})">삭제</button></td></tr>`).join('')}</tbody></table>
-    <form id="ruleform" class="row" style="margin-top:12px">
-      <select name="rule_type" style="width:92px"><option value="extract">extract</option><option value="verify">verify</option></select>
-      <input name="doc_type" placeholder="문서 유형 (예: 사업자등록증, *)" required style="width:150px">
-      <input name="field" placeholder="필드 (예: 대표자 성명)" required style="width:130px">
-      <input name="instruction" placeholder="설명 (선택)">
-      <button class="sm" style="white-space:nowrap">규칙 추가</button></form></div>
-  <div class="card"><h2>종합 검사 규칙 (제출건 단위)</h2>
-    <p class="hint">파일별 추출이 끝난 값들을 놓고 서류를 가로질러 평가하는 규칙. 자연어로 쓰면 됩니다 (예: "사업자등록증 대표자와 서약서 서명자가 같아야 한다"). PDF 를 다시 읽지 않고 추출값 텍스트로만 판단합니다.</p>
-    <table><thead><tr><th>이름</th><th>규칙 내용</th><th></th></tr></thead>
-    <tbody>${pack.rules.filter(r=>r.scope==='submission').map(r=>`<tr>
-      <td style="white-space:nowrap"><b>${esc(r.field)}</b></td><td class="hint">${esc(r.instruction)}</td>
-      <td><button class="ghost sm" onclick="delRule(${r.id})">삭제</button></td></tr>`).join('')}</tbody></table>
-    <form id="subruleform" style="margin-top:12px">
-      <input name="field" placeholder="규칙 이름 (예: 대표자·서명자 일치)" required>
-      <textarea name="instruction" placeholder="규칙 내용을 자연어로 (무엇을 어떤 기준으로 판정할지)" required rows="2" style="margin-top:8px"></textarea>
-      <button class="sm" style="margin-top:8px">종합 규칙 추가</button></form></div></section>`;
-  $('#ruleform').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);
-    await api('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pack_id:pack.id,rule_type:f.get('rule_type'),doc_type:f.get('doc_type'),field:f.get('field'),instruction:f.get('instruction')})});viewHome()});
-  $('#dtform').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);
-    await api('/api/doc_types',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pack_id:pack.id,name:f.get('name'),required:!!f.get('required'),filename_hints:f.get('filename_hints'),description:f.get('description')})});viewHome()});
-  $('#subruleform').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);
-    await api('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pack_id:pack.id,rule_type:'verify',scope:'submission',doc_type:'종합',field:f.get('field'),instruction:f.get('instruction')})});viewHome()});
-  $('#upform').addEventListener('submit',async e=>{e.preventDefault();e.target.querySelector('button').disabled=true;
-    const j=await api('/api/submissions',{method:'POST',body:new FormData(e.target)});location.hash='#sub/'+j.id});
-  renderSubs();pollTimer=setInterval(renderSubs,3000)}
-
-async function renderSubs(){const subs=await api('/api/submissions');
-  const el=$('#subs');if(!el)return;
-  el.innerHTML=subs.length?subs.map(s=>`<div class="item" onclick="location.hash='#sub/${s.id}'">
-    <div class="row" style="justify-content:space-between"><b>${esc(s.name)}</b><span class="badge b-${esc(s.status)}">${esc(s.status)}</span></div>
-    <div class="hint">파일 ${s.file_count} · 탐지 ${s.detection_count} · 골든 ${s.golden_count} · ${esc((s.created_at||'').slice(0,16).replace('T',' '))}</div>
-    ${s.error?`<div class="hint warn">${esc(s.error)}</div>`:''}</div>`).join(''):'<p class="hint">아직 없음. ZIP 을 올려보세요.</p>'}
-
-async function viewSubmission(id){const d=await api('/api/submissions/'+id);
-  $('#crumb').textContent='› '+d.name;
-  const aggHtml=Object.entries(d.aggregation).map(([field,vals])=>{
-    const multi=vals.length>1;
-    return `<div class="det"><div class="row" style="justify-content:space-between"><b>${esc(field)}</b>
-      <span class="${multi?'warn':'hint'}" style="font-size:12px">${multi?'값 '+vals.length+'종 — 확인 필요':vals[0]?vals[0].n+'개 파일 일치':''}</span></div>
-      ${vals.map(v=>`<div class="agg-val"><span style="font-family:ui-monospace,monospace">${esc(v.val)}</span><span class="hint">${v.n}개 파일</span></div>`).join('')}</div>`}).join('');
-  const missing=d.checklist.filter(c=>c.required&&!c.present);
-  const clRow=c=>`<div class="agg-val">
-    <span>${c.present?'<span style="color:#087443">✓</span>':(c.required?'<span class="warn">✗</span>':'<span class="hint">–</span>')}
-    ${esc(c.name)}</span>
-    <span class="hint">${c.files.length?esc(c.files.length+'건'):''}</span></div>`;
-  const checkHtml=
-    `<p style="font-size:12px;font-weight:700;margin:8px 0 2px">필수</p>`+d.checklist.filter(c=>c.required).map(clRow).join('')+
-    (d.checklist.some(c=>!c.required)?`<p style="font-size:12px;font-weight:700;margin:10px 0 2px;color:#667085">선택</p>`+d.checklist.filter(c=>!c.required).map(clRow).join(''):'');
-  const vb=v=>`<span class="badge b-${esc(v)}">${esc(v)}</span>`;
-  const checksHtml=(d.checks||[]).map(c=>`<div class="det ${esc(c.feedback)}">
-    <div class="row" style="justify-content:space-between"><span>${vb(c.verdict)} <b>${esc(c.name)}</b></span></div>
-    <p class="hint" style="margin:6px 0">${esc(c.evidence)}</p>
-    ${(c.refs||[]).length?`<p class="hint" style="margin:0 0 6px;font-family:ui-monospace,monospace;font-size:11px">${c.refs.map(r=>esc(r.file+' · '+r.field+' = '+r.value)).join('<br>')}</p>`:''}
-    <div class="row"><button class="sm ${c.feedback==='correct'?'':'ghost'}" onclick="checkFeedback(${c.id},'correct',${d.id})">맞음</button>
-    <button class="sm ${c.feedback==='wrong'?'':'ghost'}" onclick="checkFeedback(${c.id},'wrong',${d.id})">틀림</button></div></div>`).join('');
-  $('#main').innerHTML=`
-  <section class="card"><h2>파일 ${d.files.length}건 <span class="badge b-${esc(d.status)}">${esc(d.status)}</span></h2>
-    ${d.files.map(f=>`<div class="item" onclick="location.hash='#file/${f.id}'">
-      <div class="row" style="justify-content:space-between"><span style="font-size:13px">${esc(f.filename)}</span>
-      <span class="row">${f.golden_count?`<span class="badge b-golden">골든 ${f.golden_count}</span>`:''}<span class="badge b-${esc(f.status)}">${esc(f.status)}</span></span></div>
-      <div class="hint">${esc(f.doc_type||'유형 미판별')}${f.status==='detected'&&!f.doc_type_registered?' <span class="badge b-uncertain">미등록 유형</span>':''} · ${f.page_count}p · 탐지 ${f.detection_count}건${f.error?' · <span class=warn>'+esc(f.error)+'</span>':''}</div></div>`).join('')}</section>
-  <section><div class="card"><h2>필수서류 완비 체크 ${missing.length?`<span class="badge b-fail">필수 ${missing.length}종 누락</span>`:`<span class="badge b-pass">완비</span>`}</h2>
-    ${checkHtml}
-    ${d.unmatched_files.length?`<p class="hint" style="margin-bottom:0"><b>어느 유형에도 안 잡힌 파일:</b> ${d.unmatched_files.map(esc).join(', ')}</p>`:''}</div>
-  <div class="card"><h2>종합 검사 (제출건 규칙)</h2>
-    <p class="hint">파일별 추출값을 텍스트로 놓고 서류를 가로질러 평가한 결과입니다 (Gemini pro). 탐지를 정정했으면 다시 실행하세요.</p>
-    <button class="ghost sm" style="width:100%;margin-bottom:10px" id="checkbtn" onclick="runChecks(${d.id})">종합 검사 다시 실행</button>
-    ${checksHtml||'<p class="hint">아직 결과 없음 — 탐지 완료 시 자동 실행되거나 위 버튼으로 실행하세요.</p>'}</div>
-  <div class="card"><h2>교차 탐지 현황</h2><p class="hint">틀림 처리한 탐지는 제외. 같은 필드에 값이 여러 종이면 표기 불일치 또는 오탐입니다.</p>${aggHtml||'<p class="hint">탐지 결과 대기 중…</p>'}</div></section>`;
-  if(d.status==='processing')pollTimer=setInterval(async()=>{const s=await api('/api/submissions/'+id);if(s.status!=='processing'){clearInterval(pollTimer);viewSubmission(id)}},3000)}
-
-let FD=null;
-async function viewFile(id){FD=await api('/api/files/'+id);
-  $('#crumb').innerHTML=`› <a href="#sub/${FD.submission_id}">${esc(FD.submission_name)}</a> › ${esc(FD.filename)}`;
-  const dets=FD.detections;
-  const pagesHtml=FD.pages.map(p=>{
-    const boxes=dets.filter(d=>d.page_no===p.page_no).map(d=>{
-      const[y1,x1,y2,x2]=d.box;
-      return `<div class="dbox ${esc(d.feedback)}" id="box${d.id}" onclick="focusDet(${d.id})"
-        style="top:${y1/10}%;left:${x1/10}%;width:${(x2-x1)/10}%;height:${(y2-y1)/10}%">
-        <span class="tag">${esc(d.field)}</span></div>`}).join('');
-    return `<div class="pagewrap"><img src="/pageimg/${p.id}" loading="lazy">${boxes}
-      <span class="hint" style="position:absolute;right:6px;bottom:4px">p${p.page_no}</span></div>`}).join('');
-  const detsHtml=dets.map(d=>`<div class="det ${esc(d.feedback)}" id="det${d.id}">
-    <div class="row" style="justify-content:space-between"><span><b>${esc(d.field)}</b>
-    ${d.verdict?` <span class="badge b-${esc(d.verdict)}">${esc(d.verdict)}</span>`:''}</span>
-    <span class="hint">p${d.page_no} · conf ${(d.confidence??0).toFixed(2)}</span></div>
-    <div class="val">${esc(d.value)}</div>
-    <div class="row"><button class="sm ${d.feedback==='correct'?'':'ghost'}" onclick="feedback(${d.id},'correct')">맞음</button>
-    <button class="sm ${d.feedback==='wrong'?'':'ghost'}" onclick="feedback(${d.id},'wrong')">틀림</button>
-    <input placeholder="정정 값 (틀림일 때)" value="${esc(d.corrected_value)}" onchange="feedback(${d.id},'wrong',this.value)" style="flex:1"></div></div>`).join('');
-  const goldenBadge=FD.golden.length?`<span class="badge b-golden">골든셋 등록됨 (${FD.golden.length}필드)</span>`:'';
-  const unregHtml=FD.status==='detected'&&!FD.doc_type_registered?`
-    <div class="det" style="border-color:#f0b429;background:#fffbeb">
-      <b>미등록 유형: ${esc(FD.doc_type||'미상')}</b>
-      <p class="hint" style="margin:4px 0 8px">${esc(FD.doc_type_evidence)}</p>
-      <button class="sm" onclick="registerDocType()">이 유형을 레지스트리에 등록</button></div>`:'';
-  $('#main').innerHTML=`
-  <section>${pagesHtml||'<div class="card"><p class="hint">페이지 이미지 없음 (변환 안 된 파일)</p></div>'}</section>
-  <section style="position:sticky;top:14px"><div class="card" style="max-height:52vh;overflow:auto"><h2>탐지 ${dets.length}건 — ${esc(FD.doc_type||'유형 미판별')}</h2>
-    ${unregHtml}${detsHtml||'<p class="hint">탐지된 필드 없음</p>'}
-    <button class="ghost sm" style="width:100%" onclick="suggestRules()" id="sugbtn">이 문서에서 점검할 규칙 제안 받기</button>
-    <div id="suggestions"></div></div>
-  <div class="card"><h2>골든셋 확정 ${goldenBadge}</h2>
-    <p class="hint">'맞음' 표시(또는 정정 값 입력)된 탐지가 이 파일의 정답으로 저장됩니다.</p>
-    <label>파일 판정</label><select id="gverdict"><option value="pass">pass</option><option value="fail">fail</option><option value="uncertain">uncertain</option></select>
-    <label>메모</label><input id="gnote" placeholder="적발 사항 등 (선택)">
-    <button style="margin-top:12px;width:100%" onclick="saveGolden()">골든셋으로 저장</button>
-    <button class="ghost" style="margin-top:8px;width:100%" onclick="redetect()">현재 규칙으로 재탐지</button></div></section>`;
-  if(FD.golden.length){$('#gverdict').value=FD.golden[0].verdict;$('#gnote').value=FD.golden[0].note}}
-
-function focusDet(id){const el=document.getElementById('det'+id);if(el){el.scrollIntoView({block:'center',behavior:'smooth'});el.style.outline='2px solid #146c5f';setTimeout(()=>el.style.outline='',900)}}
-async function feedback(id,fb,cv){const d=FD.detections.find(x=>x.id===id);
-  if(cv===undefined&&d.feedback===fb)fb='';
-  await api('/api/detections/'+id+'/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({feedback:fb,corrected_value:cv??d.corrected_value})});
-  viewFile(FD.id)}
-async function saveGolden(){
-  const items=FD.detections.filter(d=>d.feedback==='correct'||d.corrected_value)
-    .map(d=>({field:d.field,expected_value:d.verdict?d.verdict:(d.corrected_value||d.value),source_detection_id:d.id}));
-  if(!items.length&&!confirm('맞음 표시된 탐지가 없습니다. 판정만 저장할까요?'))return;
-  await api('/api/files/'+FD.id+'/golden',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({verdict:$('#gverdict').value,note:$('#gnote').value,items})});
-  viewFile(FD.id)}
-async function redetect(){if(!confirm('현재 규칙으로 이 파일을 다시 탐지합니다. 기존 피드백 없는 탐지는 교체됩니다.'))return;
-  await api('/api/files/'+FD.id+'/redetect',{method:'POST'});
-  const wait=setInterval(async()=>{const f=await api('/api/files/'+FD.id);if(f.status!=='pending'){clearInterval(wait);viewFile(FD.id)}},2000)}
-async function viewGolden(){$('#crumb').textContent='› 골든셋 검사';
-  const runs=await api('/api/golden_runs');
-  $('#main').innerHTML=`
-  <section class="card"><h2>골든셋 검사 — #2 골든 러너</h2>
-    <p class="hint">검토 화면에서 확정한 정답(골든셋) 파일을 <b>현재 규칙으로 다시 탐지</b>해 정답과 대조합니다.
-    규칙·프롬프트를 바꾼 뒤 돌리면 기존 정답이 깨졌는지(회귀) 바로 보여요. 같은 파일+같은 규칙이면 캐시를 써서 비용이 없습니다.</p>
-    <button style="width:100%" onclick="startGolden()" id="grunbtn">지금 검사 실행</button>
-    <h2 style="margin-top:18px">실행 이력</h2>
-    <div id="runlist">${runs.map(r=>`<div class="item" onclick="showRun(${r.id})">
-      <div class="row" style="justify-content:space-between"><b>검사 #${r.id}</b>
-      <span class="badge ${r.status==='error'?'b-error':r.status==='running'?'b-processing':(r.matched===r.total?'b-pass':'b-fail')}">
-      ${r.status==='done'?`${r.matched}/${r.total} 일치`:esc(r.status)}</span></div>
-      <div class="hint">${esc((r.created_at||'').slice(0,19).replace('T',' '))}</div></div>`).join('')||'<p class="hint">아직 실행한 검사가 없어요.</p>'}</div></section>
-  <section class="card" id="rundetail"><p class="hint">왼쪽에서 검사를 실행하거나 이력을 선택하면 결과가 여기 표시됩니다.</p></section>`;
-  if(runs[0])showRun(runs[0].id)}
-async function showRun(id){const d=await api('/api/golden_runs/'+id);const el=$('#rundetail');if(!el)return;
-  if(d.status==='running'){el.innerHTML='<p class="hint">검사 실행 중… (규칙이 바뀐 파일은 VLM 재호출)</p>';
-    clearInterval(pollTimer);pollTimer=setInterval(()=>showRun(id),2500);return}
-  clearInterval(pollTimer);
-  if(d.status==='error'){el.innerHTML=`<p class="warn">실행 실패: ${esc((d.results[0]||{}).error||'')}</p>`;return}
-  const byFile={};(d.results||[]).forEach(r=>{(byFile[r.filename]=byFile[r.filename]||[]).push(r)});
-  const pct=d.total?Math.round(d.matched/d.total*100):0;
-  el.innerHTML=`<h2>검사 #${d.id} 결과
-    <span class="badge ${d.matched===d.total?'b-pass':'b-fail'}">${d.matched}/${d.total} 일치 (${pct}%)</span></h2>
-    ${Object.entries(byFile).map(([fn,rows])=>`
-      <div class="det"><b style="font-size:13px">${esc(fn)}</b>
-      <table style="margin-top:6px"><thead><tr><th></th><th>필드</th><th>정답</th><th>이번 탐지</th></tr></thead><tbody>
-      ${rows.map(r=>`<tr${r.ok?'':' style="background:#fde8e8"'}>
-        <td>${r.ok?'<span style="color:#087443">✓</span>':'<span class="warn">✗</span>'}</td>
-        <td><b>${esc(r.field)}</b></td>
-        <td style="font-family:ui-monospace,monospace;font-size:12px">${esc(r.expected)}</td>
-        <td style="font-family:ui-monospace,monospace;font-size:12px">${r.got.map(esc).join('<br>')||'<span class="hint">(미탐지)</span>'}</td></tr>`).join('')}
-      </tbody></table></div>`).join('')}`}
-async function startGolden(){const btn=$('#grunbtn');btn.disabled=true;
-  try{const r=await api('/api/golden_runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pack_id:1})});
-    showRun(r.id);const runs=await api('/api/golden_runs');
-    $('#runlist').innerHTML=runs.map(r2=>`<div class="item" onclick="showRun(${r2.id})">
-      <div class="row" style="justify-content:space-between"><b>검사 #${r2.id}</b>
-      <span class="badge ${r2.status==='running'?'b-processing':(r2.matched===r2.total?'b-pass':'b-fail')}">${r2.status==='done'?`${r2.matched}/${r2.total} 일치`:esc(r2.status)}</span></div>
-      <div class="hint">${esc((r2.created_at||'').slice(0,19).replace('T',' '))}</div></div>`).join('')}
-  catch(e){alert(e.message)}
-  finally{btn.disabled=false}}
-async function delRule(id){if(!confirm('규칙을 삭제할까요?'))return;await api('/api/rules/'+id,{method:'DELETE'});viewHome()}
-async function delDocType(id){if(!confirm('문서 유형을 삭제할까요?'))return;await api('/api/doc_types/'+id,{method:'DELETE'});viewHome()}
-async function toggleDocType(id){await api('/api/doc_types/'+id+'/toggle',{method:'POST'});viewHome()}
-async function checkFeedback(id,fb,subId){await api('/api/checks/'+id+'/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({feedback:fb})});viewSubmission(subId)}
-async function runChecks(subId){const btn=$('#checkbtn');btn.disabled=true;btn.textContent='pro 가 추출값을 검토하는 중…';
-  await api('/api/submissions/'+subId+'/check',{method:'POST'});
-  setTimeout(()=>viewSubmission(subId),12000)}
-async function registerDocType(){const hints=prompt('파일명 힌트 (쉼표 구분, 선택)','')??'';
-  await api('/api/doc_types',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({pack_id:FD.pack_id,name:FD.doc_type,required:false,filename_hints:hints,description:FD.doc_type_evidence})});
-  alert('등록됐어요. 재탐지하면 등록 유형으로 판별됩니다.');viewFile(FD.id)}
-let SUG=[];
-async function suggestRules(){const btn=$('#sugbtn');btn.disabled=true;btn.textContent='VLM 이 문서를 읽는 중…';
-  try{const r=await api('/api/files/'+FD.id+'/suggest_rules',{method:'POST'});SUG=r.suggestions;
-    $('#suggestions').innerHTML=SUG.length?SUG.map((s,i)=>`<div class="det" id="sug${i}">
-      <div class="row" style="justify-content:space-between"><span><span class="badge ${s.rule_type==='verify'?'b-uncertain':'b-skipped'}">${esc(s.rule_type)}</span> <b>${esc(s.field)}</b></span>
-      <button class="sm" onclick="addSuggested(${i})">추가</button></div>
-      <p class="hint" style="margin:6px 0 0">${esc(s.instruction)}<br><i>왜: ${esc(s.why)}</i></p></div>`).join('')
-      :'<p class="hint">제안할 규칙이 없대요.</p>'}
-  finally{btn.disabled=false;btn.textContent='이 문서에서 점검할 규칙 제안 받기'}}
-async function addSuggested(i){const s=SUG[i];
-  await api('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({pack_id:FD.pack_id,rule_type:s.rule_type,doc_type:s.doc_type,field:s.field,instruction:s.instruction})});
-  document.getElementById('sug'+i).style.opacity=.4;document.querySelector('#sug'+i+' button').textContent='추가됨'}
-route();
-</script></body></html>"""
+UI_PATH = BASE / "review_ui.html"
 
 
 def parse_multipart(headers, body: bytes) -> dict:
@@ -338,16 +66,21 @@ def detect_file(conn, file_id: int, pdf: Path, rules: list[dict], doc_types: lis
                 cache: VLMCache, api_key: str) -> None:
     """파일 하나: 페이지 렌더(없으면) + 탐지 + DB 기록."""
     page_dir = DATA / f"file_{file_id}"
+    timings: dict[str, list[float]] = {}
     have = conn.execute("SELECT count(*) AS n FROM pages WHERE file_id = %s", (file_id,)).fetchone()["n"]
     if not have:
+        t0 = time.time()
         pages = render_pages(pdf, page_dir)
+        timings["render"] = [t0, time.time()]
         for p in pages:
             conn.execute(
                 "INSERT INTO pages (file_id, page_no, image_path, width, height) VALUES (%s, %s, %s, %s, %s)",
                 (file_id, p["page_no"], p["image_path"], p["width"], p["height"]),
             )
         conn.execute("UPDATE files SET page_count = %s WHERE id = %s", (len(pages), file_id))
+    t0 = time.time()
     result, _ = detect(pdf, rules, doc_types, cache, api_key)
+    timings["detect"] = [t0, time.time()]
     conn.execute("DELETE FROM detections WHERE file_id = %s AND feedback = ''", (file_id,))
     # 피드백 있는 탐지는 보존되므로, 같은 항목이 다시 나오면 중복 삽입하지 않는다
     kept = {(r["field"], r["page_no"], r["value"]) for r in conn.execute(
@@ -366,9 +99,9 @@ def detect_file(conn, file_id: int, pdf: Path, rules: list[dict], doc_types: lis
         )
     conn.execute(
         "UPDATE files SET doc_type = %s, doc_type_registered = %s, doc_type_evidence = %s, "
-        "status = 'detected', error = '' WHERE id = %s",
+        "status = 'detected', error = '', timings = timings || %s::jsonb WHERE id = %s",
         (result.get("doc_type") or "", bool(result.get("doc_type_registered")),
-         result.get("doc_type_evidence") or "", file_id),
+         result.get("doc_type_evidence") or "", json.dumps(timings), file_id),
     )
 
 
@@ -413,13 +146,16 @@ def build_snapshot(conn, sub_id: int, pack_id: int) -> str:
 
 def run_submission_checks(sub_id: int, pack_id: int) -> None:
     """종합 규칙(scope=submission)을 pro 텍스트 평가로 실행하고 결과를 저장."""
+    t0 = time.time()
     with db.connect() as conn:
         rules = pack_rules(conn, pack_id, scope="submission")
         if not rules:
             return
+        base_date = conn.execute(
+            "SELECT base_date FROM submissions WHERE id = %s", (sub_id,)
+        ).fetchone()["base_date"]
         snapshot = build_snapshot(conn, sub_id, pack_id)
-    today = __import__("datetime").date.today().isoformat()
-    checks = check_submission(snapshot, rules, load_api_key(), today)
+    checks = check_submission(snapshot, rules, load_api_key(), base_date.isoformat())
     by_id = {r["id"]: r for r in rules}
     with db.connect() as conn:
         conn.execute("DELETE FROM submission_checks WHERE submission_id = %s AND feedback = ''", (sub_id,))
@@ -430,6 +166,8 @@ def run_submission_checks(sub_id: int, pack_id: int) -> None:
                 (sub_id, c["rule_id"], by_id[c["rule_id"]]["field"], c["verdict"], c["evidence"],
                  json.dumps(c["refs"], ensure_ascii=False)),
             )
+        conn.execute("UPDATE submissions SET timings = timings || %s::jsonb WHERE id = %s",
+                     (json.dumps({"checks": [t0, time.time()]}), sub_id))
 
 
 def run_golden(run_id: int, pack_id: int) -> None:
@@ -490,10 +228,14 @@ def process_submission(sub_id: int, zip_path: Path, pack_id: int) -> None:
     run_dir = DATA / f"sub_{sub_id}"
     converted = run_dir / "converted"
     try:
+        t0 = time.time()
         proc = subprocess.run(
             [sys.executable, "batch_convert.py", str(zip_path), str(converted), "4"],
             cwd=BASE, text=True, capture_output=True,
         )
+        with db.connect() as conn:
+            conn.execute("UPDATE submissions SET timings = timings || %s::jsonb WHERE id = %s",
+                         (json.dumps({"convert": [t0, time.time()]}), sub_id))
         if proc.returncode:
             raise RuntimeError(f"변환 실패: {(proc.stdout + proc.stderr)[-500:]}")
         with db.connect() as conn:
@@ -520,7 +262,10 @@ def process_submission(sub_id: int, zip_path: Path, pack_id: int) -> None:
                     (sub_id, f.name, str(f)),
                 )
             conn.execute("UPDATE submissions SET status = 'ready' WHERE id = %s", (sub_id,))
-        run_submission_checks(sub_id, pack_id)  # 추출 완료 후 종합 검사 자동 실행
+        try:
+            run_submission_checks(sub_id, pack_id)  # 추출 완료 후 종합 검사 자동 실행
+        except Exception as e:  # 종합 검사 실패는 UI 에서 재실행 가능 — 제출건 상태는 유지
+            print(f"[sub {sub_id}] 종합 검사 자동 실행 실패: {e}")
     except Exception as e:
         with db.connect() as conn:
             conn.execute("UPDATE submissions SET status = 'error', error = %s WHERE id = %s", (str(e)[:500], sub_id))
@@ -531,7 +276,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             if path == "/":
-                return self.send_bytes(INDEX_HTML.encode(), "text/html; charset=utf-8")
+                return self.send_bytes(UI_PATH.read_text(encoding="utf-8").encode(), "text/html; charset=utf-8")
             if path == "/api/bootstrap":
                 with db.connect() as conn:
                     packs = conn.execute("SELECT id, slug, name FROM packs ORDER BY id").fetchall()
@@ -579,7 +324,7 @@ class Handler(BaseHTTPRequestHandler):
             if not sub:
                 return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
             sub["files"] = conn.execute(
-                "SELECT f.id, f.filename, f.doc_type, f.doc_type_registered, f.page_count, f.status, f.error,"
+                "SELECT f.id, f.filename, f.doc_type, f.doc_type_registered, f.page_count, f.status, f.error, f.timings,"
                 " (SELECT count(*) FROM detections d WHERE d.file_id = f.id) AS detection_count,"
                 " (SELECT count(*) FROM golden_verdicts g WHERE g.file_id = f.id) AS golden_count "
                 "FROM files f WHERE f.submission_id = %s ORDER BY f.filename", (sub_id,),
@@ -768,11 +513,13 @@ class Handler(BaseHTTPRequestHandler):
         if "zip" not in parts or not parts["zip"][1]:
             raise ValueError("zip 파일이 없습니다")
         pack_id = int(parts.get("pack_id", ("", b"1"))[1] or b"1")
+        base_date = (parts.get("base_date", ("", b""))[1] or b"").decode().strip() or None
         filename = Path(parts["zip"][0] or "upload.zip").name
         with db.connect() as conn:
             sub_id = conn.execute(
-                "INSERT INTO submissions (pack_id, name) VALUES (%s, %s) RETURNING id",
-                (pack_id, filename.removesuffix(".zip")),
+                "INSERT INTO submissions (pack_id, name, base_date) "
+                "VALUES (%s, %s, COALESCE(%s::date, CURRENT_DATE)) RETURNING id",
+                (pack_id, filename.removesuffix(".zip"), base_date),
             ).fetchone()["id"]
         run_dir = DATA / f"sub_{sub_id}"
         run_dir.mkdir(parents=True, exist_ok=True)

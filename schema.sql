@@ -93,6 +93,19 @@ CREATE TABLE IF NOT EXISTS golden_verdicts (
   UNIQUE (file_id, field)
 );
 
+-- 종합 검사 결과: scope='submission' 규칙을 추출값 텍스트 기반으로 평가한 판정 (제출건 단위)
+CREATE TABLE IF NOT EXISTS submission_checks (
+  id serial PRIMARY KEY,
+  submission_id int NOT NULL REFERENCES submissions(id),
+  rule_id int REFERENCES rules(id),
+  name text NOT NULL,
+  verdict text NOT NULL,                        -- pass | fail | uncertain
+  evidence text NOT NULL DEFAULT '',
+  refs jsonb NOT NULL DEFAULT '[]',             -- [{file, field, value}]
+  feedback text NOT NULL DEFAULT '',            -- '' | correct | wrong
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
 -- 골든셋 검사 실행 이력 (#2 골든 러너): 현재 규칙으로 골든 파일을 재탐지해 정답과 대조한 결과
 CREATE TABLE IF NOT EXISTS golden_runs (
   id serial PRIMARY KEY,
@@ -106,6 +119,7 @@ CREATE TABLE IF NOT EXISTS golden_runs (
 
 -- 증분 마이그레이션 (IF NOT EXISTS 로 멱등)
 ALTER TABLE rules ADD COLUMN IF NOT EXISTS rule_type text NOT NULL DEFAULT 'extract';     -- extract | verify
+ALTER TABLE rules ADD COLUMN IF NOT EXISTS scope text NOT NULL DEFAULT 'file';             -- file(파일별 VLM 탐지) | submission(추출값 텍스트 종합)
 ALTER TABLE detections ADD COLUMN IF NOT EXISTS verdict text NOT NULL DEFAULT '';          -- verify 규칙: pass | fail | uncertain
 ALTER TABLE files ADD COLUMN IF NOT EXISTS doc_type_registered boolean NOT NULL DEFAULT false;
 ALTER TABLE files ADD COLUMN IF NOT EXISTS doc_type_evidence text NOT NULL DEFAULT '';

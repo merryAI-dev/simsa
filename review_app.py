@@ -23,7 +23,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import db
-from detect_fields import PROMPT_VERSION, detect, render_pages, suggest_rules
+from detect_fields import PROMPT_VERSION, check_submission, detect, render_pages, suggest_rules
 from vlm_cache import VLMCache
 from vlm_screen import load_api_key
 
@@ -93,9 +93,10 @@ async function viewHome(){$('#crumb').textContent='';
   <div class="card"><h2>제출건</h2><div id="subs">불러오는 중…</div></div></section>
   <section><div class="card"><h2>문서 유형 레지스트리 — ${esc(pack.name)}</h2>
     <p class="hint">"어떤 서류가 들어와야 하는가"의 기준. 내용 기반 VLM 판별이 주, 파일명 힌트는 보조입니다. 필수 유형이 빠지면 제출건 화면에 경고가 뜹니다.</p>
-    <table><thead><tr><th>유형</th><th>필수</th><th>파일명 힌트</th><th></th></tr></thead>
+    <table><thead><tr><th>유형</th><th>필수/선택</th><th>파일명 힌트</th><th></th></tr></thead>
     <tbody>${pack.doc_types.map(t=>`<tr><td><b>${esc(t.name)}</b><div class="hint">${esc(t.description)}</div></td>
-      <td>${t.required?'✓':''}</td><td class="hint">${esc((t.filename_hints||[]).join(', '))}</td>
+      <td><button class="sm ${t.required?'':'ghost'}" onclick="toggleDocType(${t.id})">${t.required?'필수':'선택'}</button></td>
+      <td class="hint">${esc((t.filename_hints||[]).join(', '))}</td>
       <td><button class="ghost sm" onclick="delDocType(${t.id})">삭제</button></td></tr>`).join('')}</tbody></table>
     <form id="dtform" class="row" style="margin-top:12px">
       <input name="name" placeholder="유형 이름" required style="width:160px">
@@ -103,10 +104,10 @@ async function viewHome(){$('#crumb').textContent='';
       <input name="filename_hints" placeholder="파일명 힌트 (쉼표 구분)" style="width:160px">
       <input name="description" placeholder="설명 (선택)">
       <button class="sm" style="white-space:nowrap">유형 추가</button></form></div>
-  <div class="card"><h2>탐지 규칙</h2>
-    <p class="hint">extract 는 값을 뽑아 교차대조, verify 는 pass/fail/uncertain 판정(서명 유효성 등). 문서 유형 '*' 는 모든 문서에 적용. 규칙 변경 후엔 파일 화면에서 '재탐지'.</p>
+  <div class="card"><h2>파일 탐지 규칙</h2>
+    <p class="hint">파일 하나 안에서 VLM 이 값·위치를 탐지. extract 는 값 추출, verify 는 pass/fail/uncertain 판정(서명 유효성 등). 문서 유형 '*' 는 모든 문서에 적용. 규칙 변경 후엔 파일 화면에서 '재탐지'.</p>
     <table><thead><tr><th>종류</th><th>문서 유형</th><th>필드</th><th>설명</th><th></th></tr></thead>
-    <tbody>${pack.rules.map(r=>`<tr><td><span class="badge ${r.rule_type==='verify'?'b-uncertain':'b-skipped'}">${esc(r.rule_type)}</span></td>
+    <tbody>${pack.rules.filter(r=>r.scope==='file').map(r=>`<tr><td><span class="badge ${r.rule_type==='verify'?'b-uncertain':'b-skipped'}">${esc(r.rule_type)}</span></td>
       <td>${esc(r.doc_type)}</td><td><b>${esc(r.field)}</b></td><td class="hint">${esc(r.instruction)}</td>
       <td><button class="ghost sm" onclick="delRule(${r.id})">삭제</button></td></tr>`).join('')}</tbody></table>
     <form id="ruleform" class="row" style="margin-top:12px">
@@ -114,11 +115,23 @@ async function viewHome(){$('#crumb').textContent='';
       <input name="doc_type" placeholder="문서 유형 (예: 사업자등록증, *)" required style="width:150px">
       <input name="field" placeholder="필드 (예: 대표자 성명)" required style="width:130px">
       <input name="instruction" placeholder="설명 (선택)">
-      <button class="sm" style="white-space:nowrap">규칙 추가</button></form></div></section>`;
+      <button class="sm" style="white-space:nowrap">규칙 추가</button></form></div>
+  <div class="card"><h2>종합 검사 규칙 (제출건 단위)</h2>
+    <p class="hint">파일별 추출이 끝난 값들을 놓고 서류를 가로질러 평가하는 규칙. 자연어로 쓰면 됩니다 (예: "사업자등록증 대표자와 서약서 서명자가 같아야 한다"). PDF 를 다시 읽지 않고 추출값 텍스트로만 판단합니다.</p>
+    <table><thead><tr><th>이름</th><th>규칙 내용</th><th></th></tr></thead>
+    <tbody>${pack.rules.filter(r=>r.scope==='submission').map(r=>`<tr>
+      <td style="white-space:nowrap"><b>${esc(r.field)}</b></td><td class="hint">${esc(r.instruction)}</td>
+      <td><button class="ghost sm" onclick="delRule(${r.id})">삭제</button></td></tr>`).join('')}</tbody></table>
+    <form id="subruleform" style="margin-top:12px">
+      <input name="field" placeholder="규칙 이름 (예: 대표자·서명자 일치)" required>
+      <textarea name="instruction" placeholder="규칙 내용을 자연어로 (무엇을 어떤 기준으로 판정할지)" required rows="2" style="margin-top:8px"></textarea>
+      <button class="sm" style="margin-top:8px">종합 규칙 추가</button></form></div></section>`;
   $('#ruleform').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);
     await api('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pack_id:pack.id,rule_type:f.get('rule_type'),doc_type:f.get('doc_type'),field:f.get('field'),instruction:f.get('instruction')})});viewHome()});
   $('#dtform').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);
     await api('/api/doc_types',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pack_id:pack.id,name:f.get('name'),required:!!f.get('required'),filename_hints:f.get('filename_hints'),description:f.get('description')})});viewHome()});
+  $('#subruleform').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);
+    await api('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pack_id:pack.id,rule_type:'verify',scope:'submission',doc_type:'종합',field:f.get('field'),instruction:f.get('instruction')})});viewHome()});
   $('#upform').addEventListener('submit',async e=>{e.preventDefault();e.target.querySelector('button').disabled=true;
     const j=await api('/api/submissions',{method:'POST',body:new FormData(e.target)});location.hash='#sub/'+j.id});
   renderSubs();pollTimer=setInterval(renderSubs,3000)}
@@ -138,10 +151,20 @@ async function viewSubmission(id){const d=await api('/api/submissions/'+id);
       <span class="${multi?'warn':'hint'}" style="font-size:12px">${multi?'값 '+vals.length+'종 — 확인 필요':vals[0]?vals[0].n+'개 파일 일치':''}</span></div>
       ${vals.map(v=>`<div class="agg-val"><span style="font-family:ui-monospace,monospace">${esc(v.val)}</span><span class="hint">${v.n}개 파일</span></div>`).join('')}</div>`}).join('');
   const missing=d.checklist.filter(c=>c.required&&!c.present);
-  const checkHtml=d.checklist.map(c=>`<div class="agg-val">
+  const clRow=c=>`<div class="agg-val">
     <span>${c.present?'<span style="color:#087443">✓</span>':(c.required?'<span class="warn">✗</span>':'<span class="hint">–</span>')}
-    ${esc(c.name)}${c.required?'':' <span class="hint">(선택)</span>'}</span>
-    <span class="hint">${c.files.length?esc(c.files.length+'건'):''}</span></div>`).join('');
+    ${esc(c.name)}</span>
+    <span class="hint">${c.files.length?esc(c.files.length+'건'):''}</span></div>`;
+  const checkHtml=
+    `<p style="font-size:12px;font-weight:700;margin:8px 0 2px">필수</p>`+d.checklist.filter(c=>c.required).map(clRow).join('')+
+    (d.checklist.some(c=>!c.required)?`<p style="font-size:12px;font-weight:700;margin:10px 0 2px;color:#667085">선택</p>`+d.checklist.filter(c=>!c.required).map(clRow).join(''):'');
+  const vb=v=>`<span class="badge b-${esc(v)}">${esc(v)}</span>`;
+  const checksHtml=(d.checks||[]).map(c=>`<div class="det ${esc(c.feedback)}">
+    <div class="row" style="justify-content:space-between"><span>${vb(c.verdict)} <b>${esc(c.name)}</b></span></div>
+    <p class="hint" style="margin:6px 0">${esc(c.evidence)}</p>
+    ${(c.refs||[]).length?`<p class="hint" style="margin:0 0 6px;font-family:ui-monospace,monospace;font-size:11px">${c.refs.map(r=>esc(r.file+' · '+r.field+' = '+r.value)).join('<br>')}</p>`:''}
+    <div class="row"><button class="sm ${c.feedback==='correct'?'':'ghost'}" onclick="checkFeedback(${c.id},'correct',${d.id})">맞음</button>
+    <button class="sm ${c.feedback==='wrong'?'':'ghost'}" onclick="checkFeedback(${c.id},'wrong',${d.id})">틀림</button></div></div>`).join('');
   $('#main').innerHTML=`
   <section class="card"><h2>파일 ${d.files.length}건 <span class="badge b-${esc(d.status)}">${esc(d.status)}</span></h2>
     ${d.files.map(f=>`<div class="item" onclick="location.hash='#file/${f.id}'">
@@ -151,6 +174,10 @@ async function viewSubmission(id){const d=await api('/api/submissions/'+id);
   <section><div class="card"><h2>필수서류 완비 체크 ${missing.length?`<span class="badge b-fail">필수 ${missing.length}종 누락</span>`:`<span class="badge b-pass">완비</span>`}</h2>
     ${checkHtml}
     ${d.unmatched_files.length?`<p class="hint" style="margin-bottom:0"><b>어느 유형에도 안 잡힌 파일:</b> ${d.unmatched_files.map(esc).join(', ')}</p>`:''}</div>
+  <div class="card"><h2>종합 검사 (제출건 규칙)</h2>
+    <p class="hint">파일별 추출값을 텍스트로 놓고 서류를 가로질러 평가한 결과입니다 (Gemini pro). 탐지를 정정했으면 다시 실행하세요.</p>
+    <button class="ghost sm" style="width:100%;margin-bottom:10px" id="checkbtn" onclick="runChecks(${d.id})">종합 검사 다시 실행</button>
+    ${checksHtml||'<p class="hint">아직 결과 없음 — 탐지 완료 시 자동 실행되거나 위 버튼으로 실행하세요.</p>'}</div>
   <div class="card"><h2>교차 탐지 현황</h2><p class="hint">틀림 처리한 탐지는 제외. 같은 필드에 값이 여러 종이면 표기 불일치 또는 오탐입니다.</p>${aggHtml||'<p class="hint">탐지 결과 대기 중…</p>'}</div></section>`;
   if(d.status==='processing')pollTimer=setInterval(async()=>{const s=await api('/api/submissions/'+id);if(s.status!=='processing'){clearInterval(pollTimer);viewSubmission(id)}},3000)}
 
@@ -253,6 +280,11 @@ async function startGolden(){const btn=$('#grunbtn');btn.disabled=true;
   finally{btn.disabled=false}}
 async function delRule(id){if(!confirm('규칙을 삭제할까요?'))return;await api('/api/rules/'+id,{method:'DELETE'});viewHome()}
 async function delDocType(id){if(!confirm('문서 유형을 삭제할까요?'))return;await api('/api/doc_types/'+id,{method:'DELETE'});viewHome()}
+async function toggleDocType(id){await api('/api/doc_types/'+id+'/toggle',{method:'POST'});viewHome()}
+async function checkFeedback(id,fb,subId){await api('/api/checks/'+id+'/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({feedback:fb})});viewSubmission(subId)}
+async function runChecks(subId){const btn=$('#checkbtn');btn.disabled=true;btn.textContent='pro 가 추출값을 검토하는 중…';
+  await api('/api/submissions/'+subId+'/check',{method:'POST'});
+  setTimeout(()=>viewSubmission(subId),12000)}
 async function registerDocType(){const hints=prompt('파일명 힌트 (쉼표 구분, 선택)','')??'';
   await api('/api/doc_types',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({pack_id:FD.pack_id,name:FD.doc_type,required:false,filename_hints:hints,description:FD.doc_type_evidence})});
@@ -286,10 +318,13 @@ def parse_multipart(headers, body: bytes) -> dict:
     return parts
 
 
-def pack_rules(conn, pack_id: int) -> list[dict]:
-    return conn.execute(
-        "SELECT id, doc_type, field, rule_type, instruction FROM rules WHERE pack_id = %s ORDER BY id", (pack_id,)
-    ).fetchall()
+def pack_rules(conn, pack_id: int, scope: str | None = None) -> list[dict]:
+    q = "SELECT id, doc_type, field, rule_type, scope, instruction FROM rules WHERE pack_id = %s"
+    args: list = [pack_id]
+    if scope:
+        q += " AND scope = %s"
+        args.append(scope)
+    return conn.execute(q + " ORDER BY id", args).fetchall()
 
 
 def pack_doc_types(conn, pack_id: int) -> list[dict]:
@@ -339,6 +374,62 @@ def detect_file(conn, file_id: int, pdf: Path, rules: list[dict], doc_types: lis
 
 def _norm(s) -> str:
     return "".join(str(s or "").split())
+
+
+def submission_detections(conn, sub_id: int) -> list[dict]:
+    """제출건의 유효 추출값 (틀림 제외, 정정 값 우선)."""
+    return conn.execute(
+        "SELECT f.filename, f.doc_type, d.field, d.verdict, "
+        " COALESCE(NULLIF(d.corrected_value, ''), d.value) AS value "
+        "FROM detections d JOIN files f ON f.id = d.file_id "
+        "WHERE f.submission_id = %s AND d.feedback <> 'wrong' "
+        "ORDER BY f.filename, d.field", (sub_id,),
+    ).fetchall()
+
+
+def build_snapshot(conn, sub_id: int, pack_id: int) -> str:
+    """종합 검사 입력: 완비 현황 + 파일별 추출값을 텍스트로 요약 (PDF 재호출 없음)."""
+    files = conn.execute(
+        "SELECT id, filename, doc_type, status FROM files WHERE submission_id = %s ORDER BY filename", (sub_id,)
+    ).fetchall()
+    doc_types = pack_doc_types(conn, pack_id)
+    lines = ["## 서류 완비 현황"]
+    for t in doc_types:
+        hits = [f for f in files if f["status"] != "skipped" and (f["doc_type"] == t["name"]
+                or any(h and h.lower() in f["filename"].lower() for h in t["filename_hints"]))]
+        req = "필수" if t["required"] else "선택"
+        lines.append(f"- [{req}] {t['name']}: " + (", ".join(f["filename"] for f in hits) if hits else "없음"))
+    lines.append("\n## 파일별 추출값")
+    by_file: dict[str, list[dict]] = {}
+    for d in submission_detections(conn, sub_id):
+        by_file.setdefault(f"{d['filename']} ({d['doc_type']})", []).append(d)
+    for header, dets in by_file.items():
+        lines.append(f"### {header}")
+        for d in dets:
+            v = f" [판정: {d['verdict']}]" if d["verdict"] else ""
+            lines.append(f"- {d['field']}: {d['value']}{v}")
+    return "\n".join(lines)
+
+
+def run_submission_checks(sub_id: int, pack_id: int) -> None:
+    """종합 규칙(scope=submission)을 pro 텍스트 평가로 실행하고 결과를 저장."""
+    with db.connect() as conn:
+        rules = pack_rules(conn, pack_id, scope="submission")
+        if not rules:
+            return
+        snapshot = build_snapshot(conn, sub_id, pack_id)
+    today = __import__("datetime").date.today().isoformat()
+    checks = check_submission(snapshot, rules, load_api_key(), today)
+    by_id = {r["id"]: r for r in rules}
+    with db.connect() as conn:
+        conn.execute("DELETE FROM submission_checks WHERE submission_id = %s AND feedback = ''", (sub_id,))
+        for c in checks:
+            conn.execute(
+                "INSERT INTO submission_checks (submission_id, rule_id, name, verdict, evidence, refs) "
+                "VALUES (%s, %s, %s, %s, %s, %s::jsonb)",
+                (sub_id, c["rule_id"], by_id[c["rule_id"]]["field"], c["verdict"], c["evidence"],
+                 json.dumps(c["refs"], ensure_ascii=False)),
+            )
 
 
 def run_golden(run_id: int, pack_id: int) -> None:
@@ -406,7 +497,7 @@ def process_submission(sub_id: int, zip_path: Path, pack_id: int) -> None:
         if proc.returncode:
             raise RuntimeError(f"변환 실패: {(proc.stdout + proc.stderr)[-500:]}")
         with db.connect() as conn:
-            rules = pack_rules(conn, pack_id)
+            rules = pack_rules(conn, pack_id, scope="file")
             doc_types = pack_doc_types(conn, pack_id)
         pdfs = sorted(p for p in converted.rglob("*.pdf"))
         others = sorted(p for p in converted.rglob("*") if p.is_file() and p.suffix != ".pdf" and p.name != "summary.json")
@@ -429,6 +520,7 @@ def process_submission(sub_id: int, zip_path: Path, pack_id: int) -> None:
                     (sub_id, f.name, str(f)),
                 )
             conn.execute("UPDATE submissions SET status = 'ready' WHERE id = %s", (sub_id,))
+        run_submission_checks(sub_id, pack_id)  # 추출 완료 후 종합 검사 자동 실행
     except Exception as e:
         with db.connect() as conn:
             conn.execute("UPDATE submissions SET status = 'error', error = %s WHERE id = %s", (str(e)[:500], sub_id))
@@ -517,6 +609,11 @@ class Handler(BaseHTTPRequestHandler):
             })
         sub["checklist"] = checklist
         sub["unmatched_files"] = [f["filename"] for f in active if f["id"] not in matched_ids]
+        with db.connect() as conn:
+            sub["checks"] = conn.execute(
+                "SELECT id, rule_id, name, verdict, evidence, refs, feedback "
+                "FROM submission_checks WHERE submission_id = %s ORDER BY id", (sub_id,),
+            ).fetchall()
         self.send_json(sub)
 
     def get_file(self, file_id: int) -> None:
@@ -560,12 +657,14 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/rules":
                 body = self.json_body()
                 rule_type = body.get("rule_type") if body.get("rule_type") in ("extract", "verify") else "extract"
+                scope = body.get("scope") if body.get("scope") in ("file", "submission") else "file"
                 with db.connect() as conn:
                     conn.execute(
-                        "INSERT INTO rules (pack_id, doc_type, field, rule_type, instruction) VALUES (%s, %s, %s, %s, %s) "
+                        "INSERT INTO rules (pack_id, doc_type, field, rule_type, scope, instruction) "
+                        "VALUES (%s, %s, %s, %s, %s, %s) "
                         "ON CONFLICT (pack_id, doc_type, field) DO UPDATE SET "
-                        "instruction = EXCLUDED.instruction, rule_type = EXCLUDED.rule_type",
-                        (body["pack_id"], body["doc_type"].strip(), body["field"].strip(), rule_type,
+                        "instruction = EXCLUDED.instruction, rule_type = EXCLUDED.rule_type, scope = EXCLUDED.scope",
+                        (body["pack_id"], body["doc_type"].strip(), body["field"].strip(), rule_type, scope,
                          (body.get("instruction") or "").strip()),
                     )
                 return self.send_json({"ok": True})
@@ -584,6 +683,24 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True})
             if path.startswith("/api/files/") and path.endswith("/suggest_rules"):
                 return self.suggest(int(path.split("/")[3]))
+            if path.startswith("/api/submissions/") and path.endswith("/check"):
+                sub_id = int(path.split("/")[3])
+                with db.connect() as conn:
+                    sub = conn.execute("SELECT pack_id FROM submissions WHERE id = %s", (sub_id,)).fetchone()
+                threading.Thread(target=run_submission_checks, args=(sub_id, sub["pack_id"]), daemon=True).start()
+                return self.send_json({"ok": True})
+            if path.startswith("/api/checks/") and path.endswith("/feedback"):
+                check_id = int(path.split("/")[3])
+                body = self.json_body()
+                with db.connect() as conn:
+                    conn.execute("UPDATE submission_checks SET feedback = %s WHERE id = %s",
+                                 (body.get("feedback") or "", check_id))
+                return self.send_json({"ok": True})
+            if path.startswith("/api/doc_types/") and path.endswith("/toggle"):
+                dt_id = int(path.split("/")[3])
+                with db.connect() as conn:
+                    conn.execute("UPDATE doc_types SET required = NOT required WHERE id = %s", (dt_id,))
+                return self.send_json({"ok": True})
             if path == "/api/golden_runs":
                 body = self.json_body()
                 pack_id = int(body.get("pack_id") or 1)
@@ -690,7 +807,7 @@ class Handler(BaseHTTPRequestHandler):
                 (file_id,),
             ).fetchone()
             conn.execute("UPDATE files SET status = 'pending' WHERE id = %s", (file_id,))
-            rules = pack_rules(conn, f["pack_id"])
+            rules = pack_rules(conn, f["pack_id"], scope="file")
             doc_types = pack_doc_types(conn, f["pack_id"])
 
         def run() -> None:

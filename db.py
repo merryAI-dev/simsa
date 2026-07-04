@@ -36,6 +36,15 @@ SEED_RULES = [
     ("건강보험자격득실확인서", "발급일", "extract", "발급 날짜. 심사 기준일로부터 3개월 이내여야 한다."),
 ]
 
+# 종합 규칙(scope=submission): 파일별 추출이 끝난 값들을 텍스트로 놓고 제출건 단위로 평가
+SEED_SUBMISSION_RULES = [
+    # (name, instruction)
+    ("대표자·서명자 일치", "사업자등록증의 대표자 성명과 각 서약서의 서명자/대표자 성명이 모두 동일 인물인지 확인한다."),
+    ("기관명 일관성", "모든 문서의 기관/법인명이 같은 법인을 가리키는지 확인한다. 주식회사/(주)/㈜ 등 표기 변형은 같은 것으로 본다."),
+    ("사업자등록번호 일치", "여러 문서에서 추출된 사업자등록번호가 모두 동일한지 확인한다."),
+    ("증명서 발급일 유효", "건강보험자격득실확인서 등 증명서류의 발급일이 심사 기준일로부터 3개월 이내인지 확인한다."),
+]
+
 SEED_DOC_TYPES = [
     # (name, required, filename_hints, description)
     ("공문", True, ["공문"], "제출 공문 (기관 직인 포함)"),
@@ -88,6 +97,13 @@ def seed() -> None:
                 "INSERT INTO rules (pack_id, doc_type, field, rule_type, instruction) VALUES (%s, %s, %s, %s, %s) "
                 "ON CONFLICT (pack_id, doc_type, field) DO NOTHING",
                 (pack_id, doc_type, field, rule_type, instruction),
+            )
+        for name, instruction in SEED_SUBMISSION_RULES:
+            conn.execute(
+                "INSERT INTO rules (pack_id, doc_type, field, rule_type, scope, instruction) "
+                "VALUES (%s, '종합', %s, 'verify', 'submission', %s) "
+                "ON CONFLICT (pack_id, doc_type, field) DO NOTHING",
+                (pack_id, name, instruction),
             )
         for name, required, hints, description in SEED_DOC_TYPES:
             conn.execute(

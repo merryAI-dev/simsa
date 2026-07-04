@@ -24,7 +24,9 @@ from vlm_screen import load_api_key
 
 BASE = Path(__file__).parent
 MODEL = "gemini-flash-latest"
-URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
+CHECK_MODEL = "gemini-pro-latest"  # 종합 검사는 추론이라 pro
+API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"
+URL = f"{API_ROOT}/{MODEL}:generateContent"
 PROMPT_VERSION = "detect-v2"
 RENDER_DPI = 150
 
@@ -94,13 +96,13 @@ SUGGEST_PROMPT = """당신은 정부 지원사업 제출서류 적격심사 설�
 - 이 문서에서 실제로 확인 가능한 것만 제안하세요."""
 
 
-def _gemini(parts: list[dict], api_key: str) -> dict:
+def _gemini(parts: list[dict], api_key: str, model: str = MODEL) -> dict:
     body = {
         "contents": [{"parts": parts}],
         "generationConfig": {"response_mime_type": "application/json", "temperature": 0},
     }
     resp = requests.post(
-        URL, json=body, timeout=180,
+        f"{API_ROOT}/{model}:generateContent", json=body, timeout=180,
         headers={"Content-Type": "application/json", "X-goog-api-key": api_key},
     )
     resp.raise_for_status()
@@ -196,6 +198,49 @@ def suggest_rules(pdf: Path, doc_type: str, existing: list[dict], api_key: str) 
                 "rule_type": s["rule_type"], "instruction": s.get("instruction") or "",
                 "why": s.get("why") or "",
             })
+    return out
+
+
+CHECK_PROMPT = """당신은 정부 지원사업 제출서류 적격심사 보조원입니다.
+아래는 한 제출건의 서류에서 이미 추출·검증된 값들과 서류 완비 현황입니다.
+종합 검사 규칙을 평가해 JSON 으로만 답하세요. 원본 문서는 볼 수 없고, 아래 텍스트가 전부입니다.
+
+심사 기준일: {today}
+
+{snapshot}
+
+종합 검사 규칙 (rule_id | 이름 | 내용):
+{rules_block}
+
+{{
+  "checks": [
+    {{
+      "rule_id": 규칙의 rule_id 숫자,
+      "verdict": "pass | fail | uncertain",
+      "evidence": "판단 근거 한 문장 — 사용한 실제 값을 인용",
+      "refs": [{{"file": "파일명", "field": "필드", "value": "값"}}]
+    }}
+  ]
+}}
+
+규칙:
+- 추출값에 없는 정보를 추측하지 마세요. 판단에 필요한 값이 추출 안 됐으면 verdict=uncertain 으로 하고 무엇이 없는지 evidence 에 쓰세요.
+- 표기 변형(주식회사/(주)/㈜, 공백 차이)은 같은 값으로 취급하되, 실제로 다른 법인·다른 번호이면 fail 입니다.
+- 날짜 계산은 반드시 위 심사 기준일 기준입니다. 당신의 학습 시점 기준으로 판단하지 마세요.
+- 모든 규칙에 대해 checks 항목을 하나씩 만드세요."""
+
+
+def check_submission(snapshot: str, rules: list[dict], api_key: str, today: str) -> list[dict]:
+    """종합 규칙(scope=submission)을 추출값 텍스트 기반으로 평가. PDF 재호출 없음."""
+    rb = "\n".join(f"- {r['id']} | {r['field']} | {r['instruction']}" for r in rules)
+    prompt = CHECK_PROMPT.format(today=today, snapshot=snapshot, rules_block=rb)
+    result = _gemini([{"text": prompt}], api_key, model=CHECK_MODEL)
+    valid_ids = {r["id"] for r in rules}
+    out = []
+    for c in result.get("checks", []):
+        if c.get("rule_id") in valid_ids and c.get("verdict") in ("pass", "fail", "uncertain"):
+            out.append({"rule_id": c["rule_id"], "verdict": c["verdict"],
+                        "evidence": str(c.get("evidence") or ""), "refs": c.get("refs") or []})
     return out
 
 

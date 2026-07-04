@@ -93,6 +93,17 @@ CREATE TABLE IF NOT EXISTS golden_verdicts (
   UNIQUE (file_id, field)
 );
 
+-- 골든셋 검사 실행 이력 (#2 골든 러너): 현재 규칙으로 골든 파일을 재탐지해 정답과 대조한 결과
+CREATE TABLE IF NOT EXISTS golden_runs (
+  id serial PRIMARY KEY,
+  pack_id int NOT NULL REFERENCES packs(id),
+  status text NOT NULL DEFAULT 'running',       -- running | done | error
+  total int NOT NULL DEFAULT 0,
+  matched int NOT NULL DEFAULT 0,
+  results jsonb NOT NULL DEFAULT '[]',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
 -- 증분 마이그레이션 (IF NOT EXISTS 로 멱등)
 ALTER TABLE rules ADD COLUMN IF NOT EXISTS rule_type text NOT NULL DEFAULT 'extract';     -- extract | verify
 ALTER TABLE detections ADD COLUMN IF NOT EXISTS verdict text NOT NULL DEFAULT '';          -- verify 규칙: pass | fail | uncertain

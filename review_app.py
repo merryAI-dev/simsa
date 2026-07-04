@@ -66,7 +66,8 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px
 .warn{color:#b42318;font-weight:700}
 @media(max-width:960px){main{grid-template-columns:1fr}}
 </style></head><body>
-<header><div class="wrap"><h1><a href="#home">simsa 심사 검토</a></h1><span class="hint" id="crumb"></span></div></header>
+<header><div class="wrap"><h1><a href="#home">simsa 심사 검토</a></h1><span class="hint" id="crumb"></span>
+<a href="#golden" style="margin-left:auto;font-size:13px;font-weight:700;color:#146c5f;text-decoration:none">골든셋 검사</a></div></header>
 <div class="wrap"><main id="main"></main></div>
 <script>
 const $=s=>document.querySelector(s);
@@ -77,6 +78,7 @@ let pollTimer=null;
 function route(){clearInterval(pollTimer);const h=location.hash||'#home';
   if(h.startsWith('#sub/'))return viewSubmission(+h.slice(5));
   if(h.startsWith('#file/'))return viewFile(+h.slice(6));
+  if(h==='#golden')return viewGolden();
   viewHome()}
 window.addEventListener('hashchange',route);
 
@@ -199,7 +201,7 @@ async function feedback(id,fb,cv){const d=FD.detections.find(x=>x.id===id);
   viewFile(FD.id)}
 async function saveGolden(){
   const items=FD.detections.filter(d=>d.feedback==='correct'||d.corrected_value)
-    .map(d=>({field:d.field,expected_value:d.corrected_value||d.value,source_detection_id:d.id}));
+    .map(d=>({field:d.field,expected_value:d.verdict?d.verdict:(d.corrected_value||d.value),source_detection_id:d.id}));
   if(!items.length&&!confirm('맞음 표시된 탐지가 없습니다. 판정만 저장할까요?'))return;
   await api('/api/files/'+FD.id+'/golden',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({verdict:$('#gverdict').value,note:$('#gnote').value,items})});
@@ -207,6 +209,48 @@ async function saveGolden(){
 async function redetect(){if(!confirm('현재 규칙으로 이 파일을 다시 탐지합니다. 기존 피드백 없는 탐지는 교체됩니다.'))return;
   await api('/api/files/'+FD.id+'/redetect',{method:'POST'});
   const wait=setInterval(async()=>{const f=await api('/api/files/'+FD.id);if(f.status!=='pending'){clearInterval(wait);viewFile(FD.id)}},2000)}
+async function viewGolden(){$('#crumb').textContent='› 골든셋 검사';
+  const runs=await api('/api/golden_runs');
+  $('#main').innerHTML=`
+  <section class="card"><h2>골든셋 검사 — #2 골든 러너</h2>
+    <p class="hint">검토 화면에서 확정한 정답(골든셋) 파일을 <b>현재 규칙으로 다시 탐지</b>해 정답과 대조합니다.
+    규칙·프롬프트를 바꾼 뒤 돌리면 기존 정답이 깨졌는지(회귀) 바로 보여요. 같은 파일+같은 규칙이면 캐시를 써서 비용이 없습니다.</p>
+    <button style="width:100%" onclick="startGolden()" id="grunbtn">지금 검사 실행</button>
+    <h2 style="margin-top:18px">실행 이력</h2>
+    <div id="runlist">${runs.map(r=>`<div class="item" onclick="showRun(${r.id})">
+      <div class="row" style="justify-content:space-between"><b>검사 #${r.id}</b>
+      <span class="badge ${r.status==='error'?'b-error':r.status==='running'?'b-processing':(r.matched===r.total?'b-pass':'b-fail')}">
+      ${r.status==='done'?`${r.matched}/${r.total} 일치`:esc(r.status)}</span></div>
+      <div class="hint">${esc((r.created_at||'').slice(0,19).replace('T',' '))}</div></div>`).join('')||'<p class="hint">아직 실행한 검사가 없어요.</p>'}</div></section>
+  <section class="card" id="rundetail"><p class="hint">왼쪽에서 검사를 실행하거나 이력을 선택하면 결과가 여기 표시됩니다.</p></section>`;
+  if(runs[0])showRun(runs[0].id)}
+async function showRun(id){const d=await api('/api/golden_runs/'+id);const el=$('#rundetail');if(!el)return;
+  if(d.status==='running'){el.innerHTML='<p class="hint">검사 실행 중… (규칙이 바뀐 파일은 VLM 재호출)</p>';
+    clearInterval(pollTimer);pollTimer=setInterval(()=>showRun(id),2500);return}
+  clearInterval(pollTimer);
+  if(d.status==='error'){el.innerHTML=`<p class="warn">실행 실패: ${esc((d.results[0]||{}).error||'')}</p>`;return}
+  const byFile={};(d.results||[]).forEach(r=>{(byFile[r.filename]=byFile[r.filename]||[]).push(r)});
+  const pct=d.total?Math.round(d.matched/d.total*100):0;
+  el.innerHTML=`<h2>검사 #${d.id} 결과
+    <span class="badge ${d.matched===d.total?'b-pass':'b-fail'}">${d.matched}/${d.total} 일치 (${pct}%)</span></h2>
+    ${Object.entries(byFile).map(([fn,rows])=>`
+      <div class="det"><b style="font-size:13px">${esc(fn)}</b>
+      <table style="margin-top:6px"><thead><tr><th></th><th>필드</th><th>정답</th><th>이번 탐지</th></tr></thead><tbody>
+      ${rows.map(r=>`<tr${r.ok?'':' style="background:#fde8e8"'}>
+        <td>${r.ok?'<span style="color:#087443">✓</span>':'<span class="warn">✗</span>'}</td>
+        <td><b>${esc(r.field)}</b></td>
+        <td style="font-family:ui-monospace,monospace;font-size:12px">${esc(r.expected)}</td>
+        <td style="font-family:ui-monospace,monospace;font-size:12px">${r.got.map(esc).join('<br>')||'<span class="hint">(미탐지)</span>'}</td></tr>`).join('')}
+      </tbody></table></div>`).join('')}`}
+async function startGolden(){const btn=$('#grunbtn');btn.disabled=true;
+  try{const r=await api('/api/golden_runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pack_id:1})});
+    showRun(r.id);const runs=await api('/api/golden_runs');
+    $('#runlist').innerHTML=runs.map(r2=>`<div class="item" onclick="showRun(${r2.id})">
+      <div class="row" style="justify-content:space-between"><b>검사 #${r2.id}</b>
+      <span class="badge ${r2.status==='running'?'b-processing':(r2.matched===r2.total?'b-pass':'b-fail')}">${r2.status==='done'?`${r2.matched}/${r2.total} 일치`:esc(r2.status)}</span></div>
+      <div class="hint">${esc((r2.created_at||'').slice(0,19).replace('T',' '))}</div></div>`).join('')}
+  catch(e){alert(e.message)}
+  finally{btn.disabled=false}}
 async function delRule(id){if(!confirm('규칙을 삭제할까요?'))return;await api('/api/rules/'+id,{method:'DELETE'});viewHome()}
 async function delDocType(id){if(!confirm('문서 유형을 삭제할까요?'))return;await api('/api/doc_types/'+id,{method:'DELETE'});viewHome()}
 async function registerDocType(){const hints=prompt('파일명 힌트 (쉼표 구분, 선택)','')??'';
@@ -293,6 +337,62 @@ def detect_file(conn, file_id: int, pdf: Path, rules: list[dict], doc_types: lis
     )
 
 
+def _norm(s) -> str:
+    return "".join(str(s or "").split())
+
+
+def run_golden(run_id: int, pack_id: int) -> None:
+    """골든 러너(#2): 골든셋이 있는 파일을 현재 규칙으로 재탐지해 정답과 대조."""
+    api_key = load_api_key()
+    cache = VLMCache(BASE / "cache/vlm", prompt_version=PROMPT_VERSION)
+    try:
+        with db.connect() as conn:
+            rules = pack_rules(conn, pack_id)
+            doc_types = pack_doc_types(conn, pack_id)
+            rows = conn.execute(
+                "SELECT g.file_id, g.field, g.expected_value, f.filename, f.pdf_path "
+                "FROM golden_verdicts g JOIN files f ON f.id = g.file_id "
+                "WHERE g.pack_id = %s AND g.field <> '_file' ORDER BY g.file_id, g.field", (pack_id,),
+            ).fetchall()
+        by_file: dict[int, list[dict]] = {}
+        for r in rows:
+            by_file.setdefault(r["file_id"], []).append(r)
+        results, matched, total = [], 0, 0
+        for file_id, items in by_file.items():
+            filename = items[0]["filename"]
+            try:
+                det, _ = detect(Path(items[0]["pdf_path"]), rules, doc_types, cache, api_key, filename=filename)
+                dets = det["detections"]
+            except Exception as e:
+                for it in items:
+                    total += 1
+                    results.append({"file_id": file_id, "filename": filename, "field": it["field"],
+                                    "expected": it["expected_value"], "got": [f"탐지 실패: {e}"], "ok": False})
+                continue
+            for it in items:
+                total += 1
+                got = [d for d in dets if d["field"] == it["field"]]
+                if any(d.get("verdict") for d in got):  # verify 골든은 verdict 대조
+                    got_vals = [d.get("verdict") or "" for d in got]
+                else:                                   # extract 골든은 값 대조 (공백 무시)
+                    got_vals = [str(d.get("value") or "") for d in got]
+                ok = any(_norm(v) == _norm(it["expected_value"]) for v in got_vals)
+                matched += ok
+                results.append({"file_id": file_id, "filename": filename, "field": it["field"],
+                                "expected": it["expected_value"], "got": got_vals, "ok": ok})
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE golden_runs SET status = 'done', total = %s, matched = %s, results = %s::jsonb WHERE id = %s",
+                (total, matched, json.dumps(results, ensure_ascii=False), run_id),
+            )
+    except Exception as e:
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE golden_runs SET status = 'error', results = %s::jsonb WHERE id = %s",
+                (json.dumps([{"error": str(e)}], ensure_ascii=False), run_id),
+            )
+
+
 def process_submission(sub_id: int, zip_path: Path, pack_id: int) -> None:
     api_key = load_api_key()
     cache = VLMCache(BASE / "cache/vlm", prompt_version=PROMPT_VERSION)
@@ -357,6 +457,20 @@ class Handler(BaseHTTPRequestHandler):
                         "FROM submissions s ORDER BY s.id DESC LIMIT 50"
                     ).fetchall()
                 return self.send_json(rows)
+            if path == "/api/golden_runs":
+                with db.connect() as conn:
+                    runs = conn.execute(
+                        "SELECT id, pack_id, status, total, matched, created_at "
+                        "FROM golden_runs ORDER BY id DESC LIMIT 20"
+                    ).fetchall()
+                return self.send_json(runs)
+            if path.startswith("/api/golden_runs/"):
+                with db.connect() as conn:
+                    run = conn.execute(
+                        "SELECT * FROM golden_runs WHERE id = %s", (int(path.rsplit("/", 1)[-1]),)
+                    ).fetchone()
+                return self.send_json(run or {"error": "not found"},
+                                      HTTPStatus.OK if run else HTTPStatus.NOT_FOUND)
             if path.startswith("/api/submissions/"):
                 return self.get_submission(int(path.rsplit("/", 1)[-1]))
             if path.startswith("/api/files/"):
@@ -470,6 +584,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True})
             if path.startswith("/api/files/") and path.endswith("/suggest_rules"):
                 return self.suggest(int(path.split("/")[3]))
+            if path == "/api/golden_runs":
+                body = self.json_body()
+                pack_id = int(body.get("pack_id") or 1)
+                with db.connect() as conn:
+                    n = conn.execute(
+                        "SELECT count(*) AS n FROM golden_verdicts WHERE pack_id = %s AND field <> '_file'",
+                        (pack_id,),
+                    ).fetchone()["n"]
+                    if not n:
+                        return self.send_json({"error": "골든셋이 비어 있습니다. 파일 검토 화면에서 먼저 정답을 확정하세요."},
+                                              HTTPStatus.BAD_REQUEST)
+                    run_id = conn.execute(
+                        "INSERT INTO golden_runs (pack_id) VALUES (%s) RETURNING id", (pack_id,)
+                    ).fetchone()["id"]
+                threading.Thread(target=run_golden, args=(run_id, pack_id), daemon=True).start()
+                return self.send_json({"id": run_id})
             if path.startswith("/api/detections/") and path.endswith("/feedback"):
                 det_id = int(path.split("/")[3])
                 body = self.json_body()

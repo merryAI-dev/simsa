@@ -25,4 +25,5 @@ echo "PostgreSQL 준비 대기..."
 until docker exec simsa-postgres pg_isready -U simsa -q 2>/dev/null; do sleep 1; done
 
 # 스키마 적용·시드는 review_app 시작 시 자동 실행됨
+(sleep 2 && open "http://127.0.0.1:8766") &
 exec python3 review_app.py "$@"

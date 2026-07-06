@@ -477,6 +477,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "image/png")
         self.send_header("Content-Length", str(path.stat().st_size))
+        # id 별 이미지는 불변(재탐지는 새 id) — 폴링 재렌더 때 브라우저가 재요청하지 않게
+        self.send_header("Cache-Control", "public, max-age=86400, immutable")
         self.end_headers()
         with open(path, "rb") as fh:
             shutil.copyfileobj(fh, self.wfile)

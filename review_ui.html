@@ -194,23 +194,29 @@ async function renderSubs(){const subs=await api('/api/submissions');const el=$(
   :'<p class="text-[13px] text-[#8B95A1]">아직 없어요. ZIP을 올려보세요.</p>'}
 
 function detBox(dd){const[y1,x1,y2,x2]=dd.box;
-  return `<div class="dbox ${esc(dd.feedback)}" id="fbox${dd.id}" onclick="location.hash='#file/'+FEED_FILE[${dd.id}]"
+  return `<div class="dbox ${esc(dd.feedback)}"
     style="top:${y1/10}%;left:${x1/10}%;width:${(x2-x1)/10}%;height:${(y2-y1)/10}%"><span class="tag">${esc(dd.field)}</span></div>`}
 
-function feedCard(f){
-  FEED_FILE=FEED_FILE||{};(f.detections||[]).forEach(dd=>FEED_FILE[dd.id]=f.file_id);
+// 라이브 스트리밍 스타일: 화면(이미지)은 최신 파일 하나만, 지나간 것은 텍스트 로그로.
+function feedScreen(f){
   const boxes=(f.detections||[]).map(detBox).join('');
-  const img=f.page?`<div class="relative rounded-xl overflow-hidden border border-[#E5E8EB] mt-2.5 w-[220px]">
-      <img src="/pageimg/${f.page.id}" loading="lazy" class="w-full block">${boxes}</div>`:'';
-  return `<div class="rounded-2xl border ${f.status==='error'?'border-[#F04452]/25 bg-[#FDEDEE]/20':'border-[#F2F4F6]'} p-4 cursor-pointer hover:border-[#3182F6]/40 transition" onclick="location.hash='#file/${f.file_id}'">
+  const img=f.page?`<div class="relative rounded-xl overflow-hidden border border-[#E5E8EB] mt-2.5 w-[300px]">
+      <img src="/pageimg/${f.page.id}" class="w-full block">${boxes}</div>`:'';
+  return `<div class="rounded-2xl border ${f.status==='error'?'border-[#F04452]/25 bg-[#FDEDEE]/20':'border-[#3182F6]/25 bg-[#E8F3FF]/20'} p-4 cursor-pointer transition" onclick="location.hash='#file/${f.file_id}'">
     <div class="flex items-center justify-between gap-2">
       <p class="text-[13.5px] font-bold truncate">${esc(f.filename)}</p>
-      <span class="flex gap-1.5 shrink-0">${badge(f.status,f.status)}</span></div>
+      <span class="flex gap-1.5 shrink-0">${badge('방금 처리','processing')}${badge(f.status,f.status)}</span></div>
     <p class="text-[12px] text-[#8B95A1] mt-0.5">${esc(f.doc_type||'유형 미판별')} · 탐지 ${(f.detections||[]).length}건${f.error?` · <span class="text-[#F04452]">${esc(f.error)}</span>`:''}</p>
     ${img}</div>`}
 
+function feedLogRow(f){
+  return `<div class="flex items-center gap-2 py-[5px] border-b border-[#F2F4F6] last:border-0 cursor-pointer hover:bg-[#F9FAFB] rounded-lg px-1" onclick="location.hash='#file/${f.file_id}'">
+    <span class="${f.status==='error'?'text-[#F04452]':'text-[#00A05C]'} font-bold text-[12px] shrink-0">${f.status==='error'?'✗':'✓'}</span>
+    <span class="text-[12.5px] truncate flex-1">${esc(f.filename)}</span>
+    <span class="text-[11.5px] text-[#8B95A1] shrink-0">${esc(f.doc_type||'미판별')} · ${(f.detections||[]).length}건</span></div>`}
+
 function auditRow(e){
-  const crop=e.crop_path?`<img src="/eventimg/${e.id}" class="w-16 h-16 object-cover rounded-lg border border-[#E5E8EB] shrink-0">`
+  const crop=e.crop_path?`<img src="/eventimg/${e.id}" loading="lazy" class="w-16 h-16 object-cover rounded-lg border border-[#E5E8EB] shrink-0">`
     :`<div class="w-16 h-16 rounded-lg bg-[#F2F4F6] shrink-0 flex items-center justify-center text-[10px] text-[#B0B8C1]">no crop</div>`;
   const isFb=e.event_type==='feedback';
   return `<div class="flex gap-3 py-3 border-b border-[#F2F4F6] last:border-0">
@@ -224,7 +230,6 @@ function auditRow(e){
       <p class="text-[11px] text-[#8B95A1] mt-1">${esc(e.filename)} · ${esc(e.model||'')} ${e.prompt_version?'· '+esc(e.prompt_version):''} ${e.confidence?'· conf '+Number(e.confidence).toFixed(2):''} · ${esc((e.created_at||'').slice(0,19).replace('T',' '))}</p>
     </div></div>`}
 
-let FEED_FILE={};
 async function viewSubmission(id){const d=await api('/api/submissions/'+id);
   $('#crumb').textContent='› '+d.name;
   const missing=d.checklist.filter(c=>c.required&&!c.present);
@@ -240,7 +245,6 @@ async function viewSubmission(id){const d=await api('/api/submissions/'+id);
     <div class="flex gap-1.5 mt-2.5">
       <button class="${c.feedback==='correct'?PS:GS}" onclick="checkFeedback(${c.id},'correct',${d.id})">맞음</button>
       <button class="${c.feedback==='wrong'?PS:GS}" onclick="checkFeedback(${c.id},'wrong',${d.id})">틀림</button></div></div>`).join('');
-  FEED_FILE={};
   $('#main').innerHTML=`
   ${card(`<div class="flex items-center gap-3 flex-wrap mb-1">
       <h2 class="text-[19px] font-extrabold">${esc(d.name)}</h2>${badge(d.status,d.status)}
@@ -253,8 +257,10 @@ async function viewSubmission(id){const d=await api('/api/submissions/'+id);
   <div class="grid lg:grid-cols-[1fr_420px] gap-5 items-start">
   <section class="space-y-5">
     ${card(h2(`라이브 탐지 피드`)+
-      hint('문서별로 AI 가 지금 무엇을 탐지하고 있는지, 페이지 위 빨간 박스로 실시간 확인해요. 파일이 끝날 때마다 카드가 쌓여요.')+
-      `<div class="space-y-3">${d.feed.map(feedCard).join('')||'<p class="text-[13px] text-[#8B95A1]">탐지 완료된 파일이 아직 없어요…</p>'}</div>`)}
+      hint('방금 처리된 문서 하나만 화면으로 보여주고, 지나간 파일은 아래 로그로 쌓여요 — 개표 상황판처럼.')+
+      (d.feed.length?feedScreen(d.feed[d.feed.length-1]):'<p class="text-[13px] text-[#8B95A1]">탐지 완료된 파일이 아직 없어요…</p>')+
+      (d.feed.length>1?`<p class="text-[12px] font-bold text-[#4E5968] mt-4 mb-1">처리 로그</p>
+        <div>${d.feed.slice(0,-1).reverse().map(feedLogRow).join('')}</div>`:''))}
     ${card(h2(`증거 로그 <span class="text-[12px] font-bold text-[#7048E8] bg-[#F0EBFD] px-2 py-0.5 rounded-full">감사 기록</span>`)+
       hint('AI 판단과 사람 확인이 시간순으로 append 되는 불변 기록이에요 — 무엇을 봤고, 언제 누가 확정했는지 전부 남아요.')+
       `<div id="auditlog" class="max-h-[60vh] overflow-auto">불러오는 중…</div>`)}
@@ -281,7 +287,9 @@ async function viewSubmission(id){const d=await api('/api/submissions/'+id);
 async function loadAudit(subId){
   const events=await api('/api/submissions/'+subId+'/audit');
   const el=$('#auditlog');if(!el)return;
-  el.innerHTML=events.length?events.slice().reverse().map(auditRow).join(''):
+  const recent=events.slice().reverse().slice(0,30);
+  el.innerHTML=events.length?(recent.map(auditRow).join('')
+    +(events.length>30?`<p class="text-[12px] text-[#8B95A1] py-2">… 외 ${events.length-30}건 (전체 ${events.length}건 보존됨)</p>`:'')):
     '<p class="text-[13px] text-[#8B95A1]">아직 이벤트 없음.</p>';}
 
 let FD=null;

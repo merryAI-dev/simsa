@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import subprocess
 import sys
@@ -23,6 +24,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from PIL import Image
+
 import db
 from detect_fields import PROMPT_VERSION, check_submission, detect, render_pages, suggest_rules
 from vlm_cache import VLMCache
@@ -32,6 +35,20 @@ BASE = Path(__file__).parent
 DATA = BASE / "data/review"
 
 UI_PATH = BASE / "review_ui.html"
+
+
+def crop_detection(page_image_path: Path, box: list[int], out_path: Path) -> None:
+    """AI 가 실제로 본 영역을 페이지 PNG 에서 잘라내 증거로 저장.
+    box = [ymin, xmin, ymax, xmax], 0~1000 정규화. 증거가 잘리지 않게 바깥쪽으로 반올림."""
+    img = Image.open(page_image_path)
+    w, h = img.size
+    ymin, xmin, ymax, xmax = box
+    x1 = max(0, min(w - 1, math.floor(xmin / 1000 * w)))
+    y1 = max(0, min(h - 1, math.floor(ymin / 1000 * h)))
+    x2 = max(x1 + 1, min(w, math.ceil(xmax / 1000 * w)))
+    y2 = max(y1 + 1, min(h, math.ceil(ymax / 1000 * h)))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    img.crop((x1, y1, x2, y2)).save(out_path)
 
 
 def parse_multipart(headers, body: bytes) -> dict:
@@ -89,13 +106,39 @@ def detect_file(conn, file_id: int, pdf: Path, rules: list[dict], doc_types: lis
         d for d in result["detections"]
         if (d["field"], int(d.get("page") or 1), str(d.get("value") or "")) not in kept
     ]
+    page_paths = {p["page_no"]: p["image_path"] for p in conn.execute(
+        "SELECT page_no, image_path FROM pages WHERE file_id = %s", (file_id,)).fetchall()}
+    crops_dir = DATA / f"file_{file_id}" / "crops"
     for d in result["detections"]:
+        page_no = int(d.get("page") or 1)
+        box = [int(v) for v in d["box_2d"]]
+        value = str(d.get("value") or "")
+        verdict = d.get("verdict") or ""
+        confidence = float(d.get("confidence") or 0)
+        det_id = conn.execute(
+            "INSERT INTO detections (file_id, page_no, rule_id, field, value, verdict, box, confidence, "
+            "model, prompt_version) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+            (file_id, page_no, d.get("rule_id"), d["field"], value, verdict, box, confidence,
+             "gemini-flash-latest", PROMPT_VERSION),
+        ).fetchone()["id"]
+        crop_path = ""
+        img_path = page_paths.get(page_no)
+        if img_path:
+            out = crops_dir / f"d{det_id}.png"
+            try:
+                crop_detection(Path(img_path), box, out)  # 크롭 파일을 먼저 쓰고, 트랜잭션은 이 함수 종료 시 커밋됨
+                crop_path = str(out)
+            except Exception as e:  # 크롭 실패해도 탐지 자체는 유효 — 크롭 없이 진행
+                print(f"[file {file_id}] detection {det_id} 크롭 실패: {e}")
+        if crop_path:
+            conn.execute("UPDATE detections SET crop_path = %s WHERE id = %s", (crop_path, det_id))
         conn.execute(
-            "INSERT INTO detections (file_id, page_no, rule_id, field, value, verdict, box, confidence, model) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (file_id, int(d.get("page") or 1), d.get("rule_id"), d["field"], str(d.get("value") or ""),
-             d.get("verdict") or "", [int(v) for v in d["box_2d"]], float(d.get("confidence") or 0),
-             "gemini-flash-latest"),
+            "INSERT INTO detection_events (submission_id, file_id, detection_id, event_type, page_no, "
+            " rule_id, field, value, verdict, box, crop_path, confidence, model, prompt_version) "
+            "SELECT f.submission_id, %s, %s, 'detected', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s "
+            "FROM files f WHERE f.id = %s",
+            (file_id, det_id, page_no, d.get("rule_id"), d["field"], value, verdict, box, crop_path,
+             confidence, "gemini-flash-latest", PROMPT_VERSION, file_id),
         )
     conn.execute(
         "UPDATE files SET doc_type = %s, doc_type_registered = %s, doc_type_evidence = %s, "
@@ -308,12 +351,27 @@ class Handler(BaseHTTPRequestHandler):
                     ).fetchone()
                 return self.send_json(run or {"error": "not found"},
                                       HTTPStatus.OK if run else HTTPStatus.NOT_FOUND)
+            if path.startswith("/api/submissions/") and path.endswith("/audit"):
+                return self.get_audit(int(path.split("/")[3]))
             if path.startswith("/api/submissions/"):
                 return self.get_submission(int(path.rsplit("/", 1)[-1]))
             if path.startswith("/api/files/"):
                 return self.get_file(int(path.rsplit("/", 1)[-1]))
             if path.startswith("/pageimg/"):
-                return self.page_image(int(path.rsplit("/", 1)[-1]))
+                with db.connect() as conn:
+                    row = conn.execute("SELECT image_path FROM pages WHERE id = %s",
+                                       (int(path.rsplit("/", 1)[-1]),)).fetchone()
+                return self.serve_image(row and row["image_path"])
+            if path.startswith("/cropimg/"):
+                with db.connect() as conn:
+                    row = conn.execute("SELECT crop_path FROM detections WHERE id = %s",
+                                       (int(path.rsplit("/", 1)[-1]),)).fetchone()
+                return self.serve_image(row and row["crop_path"])
+            if path.startswith("/eventimg/"):
+                with db.connect() as conn:
+                    row = conn.execute("SELECT crop_path FROM detection_events WHERE id = %s",
+                                       (int(path.rsplit("/", 1)[-1]),)).fetchone()
+                return self.serve_image(row and row["crop_path"])
             self.send_error(HTTPStatus.NOT_FOUND)
         except Exception as e:
             self.send_json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -359,6 +417,37 @@ class Handler(BaseHTTPRequestHandler):
                 "SELECT id, rule_id, name, verdict, evidence, refs, feedback "
                 "FROM submission_checks WHERE submission_id = %s ORDER BY id", (sub_id,),
             ).fetchall()
+            # 라이브 탐지 피드: DAG 대신 "지금 무엇을 보고 있는가"를 보여준다.
+            # 파일은 순차 처리되므로 status='pending' 인 파일이 곧 지금 처리 중인 파일.
+            current = next((f for f in sub["files"] if f["status"] == "pending"), None)
+            if current:
+                sub["current_step"] = f"지금 탐지 중: {current['filename']}"
+            elif sub["status"] == "processing":
+                # 파일 사이 짧은 틈(방금 끝난 파일 커밋 ~ 다음 파일 INSERT)일 수 있음
+                sub["current_step"] = "다음 파일 준비 중…" if sub["timings"].get("convert") else "문서 변환 중…"
+            else:
+                sub["current_step"] = None
+            feed = []
+            for f in sub["files"]:
+                if f["status"] not in ("detected", "error"):
+                    continue
+                prow = conn.execute(
+                    "SELECT page_no FROM detections WHERE file_id = %s "
+                    "GROUP BY page_no ORDER BY count(*) DESC, page_no LIMIT 1", (f["id"],),
+                ).fetchone()
+                page_no = prow["page_no"] if prow else 1
+                page = conn.execute(
+                    "SELECT id, page_no, width, height FROM pages WHERE file_id = %s AND page_no = %s",
+                    (f["id"], page_no),
+                ).fetchone()
+                dets = conn.execute(
+                    "SELECT id, field, value, verdict, confidence, feedback, corrected_value, box, crop_path "
+                    "FROM detections WHERE file_id = %s AND page_no = %s ORDER BY field",
+                    (f["id"], page_no),
+                ).fetchall() if page else []
+                feed.append({"file_id": f["id"], "filename": f["filename"], "doc_type": f["doc_type"],
+                            "status": f["status"], "error": f["error"], "page": page, "detections": dets})
+            sub["feed"] = feed
         self.send_json(sub)
 
     def get_file(self, file_id: int) -> None:
@@ -373,18 +462,16 @@ class Handler(BaseHTTPRequestHandler):
                 "SELECT id, page_no, width, height FROM pages WHERE file_id = %s ORDER BY page_no", (file_id,)
             ).fetchall()
             f["detections"] = conn.execute(
-                "SELECT id, page_no, rule_id, field, value, verdict, box, confidence, feedback, corrected_value "
-                "FROM detections WHERE file_id = %s ORDER BY page_no, field", (file_id,)
+                "SELECT id, page_no, rule_id, field, value, verdict, box, confidence, feedback, corrected_value, "
+                "crop_path FROM detections WHERE file_id = %s ORDER BY page_no, field", (file_id,)
             ).fetchall()
             f["golden"] = conn.execute(
                 "SELECT field, expected_value, verdict, note FROM golden_verdicts WHERE file_id = %s", (file_id,)
             ).fetchall()
         self.send_json(f)
 
-    def page_image(self, page_id: int) -> None:
-        with db.connect() as conn:
-            row = conn.execute("SELECT image_path FROM pages WHERE id = %s", (page_id,)).fetchone()
-        path = Path(row["image_path"]) if row else None
+    def serve_image(self, path_str: str | None) -> None:
+        path = Path(path_str) if path_str else None
         if not path or not path.is_file() or not path.is_relative_to(DATA):
             return self.send_error(HTTPStatus.NOT_FOUND)
         self.send_response(HTTPStatus.OK)
@@ -393,6 +480,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         with open(path, "rb") as fh:
             shutil.copyfileobj(fh, self.wfile)
+
+    def get_audit(self, sub_id: int) -> None:
+        """시간순 append-only 증거 로그 — AI 가 실제로 본 것 + 사람 확정 이력."""
+        with db.connect() as conn:
+            rows = conn.execute(
+                "SELECT e.*, f.filename FROM detection_events e JOIN files f ON f.id = e.file_id "
+                "WHERE e.submission_id = %s ORDER BY e.created_at, e.id", (sub_id,),
+            ).fetchall()
+        self.send_json(rows)
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
@@ -469,6 +565,18 @@ class Handler(BaseHTTPRequestHandler):
                     conn.execute(
                         "UPDATE detections SET feedback = %s, corrected_value = %s WHERE id = %s",
                         (body.get("feedback") or "", body.get("corrected_value") or "", det_id),
+                    )
+                    d = conn.execute("SELECT * FROM detections WHERE id = %s", (det_id,)).fetchone()
+                    f = conn.execute("SELECT submission_id FROM files WHERE id = %s", (d["file_id"],)).fetchone()
+                    # 감사 로그는 append-only: 맞음→틀림→정정 순서로 여러 번 눌러도 매번 새 이벤트로 쌓인다
+                    conn.execute(
+                        "INSERT INTO detection_events (submission_id, file_id, detection_id, event_type, "
+                        " page_no, rule_id, field, value, verdict, box, crop_path, confidence, model, "
+                        " prompt_version, feedback, corrected_value) "
+                        "VALUES (%s, %s, %s, 'feedback', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        (f["submission_id"], d["file_id"], det_id, d["page_no"], d["rule_id"], d["field"],
+                         d["value"], d["verdict"], d["box"], d["crop_path"], d["confidence"], d["model"],
+                         d["prompt_version"], d["feedback"], d["corrected_value"]),
                     )
                 return self.send_json({"ok": True})
             if path.startswith("/api/files/") and path.endswith("/golden"):

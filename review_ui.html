@@ -193,6 +193,38 @@ async function renderSubs(){const subs=await api('/api/submissions');const el=$(
     ${s.error?`<p class="text-[12px] text-[#F04452] mt-1 truncate">${esc(s.error)}</p>`:''}</div>`).join('')
   :'<p class="text-[13px] text-[#8B95A1]">아직 없어요. ZIP을 올려보세요.</p>'}
 
+function detBox(dd){const[y1,x1,y2,x2]=dd.box;
+  return `<div class="dbox ${esc(dd.feedback)}" id="fbox${dd.id}" onclick="location.hash='#file/'+FEED_FILE[${dd.id}]"
+    style="top:${y1/10}%;left:${x1/10}%;width:${(x2-x1)/10}%;height:${(y2-y1)/10}%"><span class="tag">${esc(dd.field)}</span></div>`}
+
+function feedCard(f){
+  FEED_FILE=FEED_FILE||{};(f.detections||[]).forEach(dd=>FEED_FILE[dd.id]=f.file_id);
+  const boxes=(f.detections||[]).map(detBox).join('');
+  const img=f.page?`<div class="relative rounded-xl overflow-hidden border border-[#E5E8EB] mt-2.5 w-[220px]">
+      <img src="/pageimg/${f.page.id}" loading="lazy" class="w-full block">${boxes}</div>`:'';
+  return `<div class="rounded-2xl border ${f.status==='error'?'border-[#F04452]/25 bg-[#FDEDEE]/20':'border-[#F2F4F6]'} p-4 cursor-pointer hover:border-[#3182F6]/40 transition" onclick="location.hash='#file/${f.file_id}'">
+    <div class="flex items-center justify-between gap-2">
+      <p class="text-[13.5px] font-bold truncate">${esc(f.filename)}</p>
+      <span class="flex gap-1.5 shrink-0">${badge(f.status,f.status)}</span></div>
+    <p class="text-[12px] text-[#8B95A1] mt-0.5">${esc(f.doc_type||'유형 미판별')} · 탐지 ${(f.detections||[]).length}건${f.error?` · <span class="text-[#F04452]">${esc(f.error)}</span>`:''}</p>
+    ${img}</div>`}
+
+function auditRow(e){
+  const crop=e.crop_path?`<img src="/eventimg/${e.id}" class="w-16 h-16 object-cover rounded-lg border border-[#E5E8EB] shrink-0">`
+    :`<div class="w-16 h-16 rounded-lg bg-[#F2F4F6] shrink-0 flex items-center justify-center text-[10px] text-[#B0B8C1]">no crop</div>`;
+  const isFb=e.event_type==='feedback';
+  return `<div class="flex gap-3 py-3 border-b border-[#F2F4F6] last:border-0">
+    ${crop}
+    <div class="min-w-0 flex-1">
+      <div class="flex items-center gap-2 flex-wrap">
+        ${badge(isFb?'사람 확인':'AI 탐지',isFb?'golden':'processing')}
+        <b class="text-[13px]">${esc(e.field)}</b>${e.verdict?badge(e.verdict,e.verdict):''}
+        ${isFb&&e.feedback?badge(e.feedback==='correct'?'맞음':'틀림',e.feedback==='correct'?'pass':'fail'):''}</div>
+      <p class="font-mono text-[12px] text-[#4E5968] mt-1 break-all">${esc(e.corrected_value||e.value)}</p>
+      <p class="text-[11px] text-[#8B95A1] mt-1">${esc(e.filename)} · ${esc(e.model||'')} ${e.prompt_version?'· '+esc(e.prompt_version):''} ${e.confidence?'· conf '+Number(e.confidence).toFixed(2):''} · ${esc((e.created_at||'').slice(0,19).replace('T',' '))}</p>
+    </div></div>`}
+
+let FEED_FILE={};
 async function viewSubmission(id){const d=await api('/api/submissions/'+id);
   $('#crumb').textContent='› '+d.name;
   const missing=d.checklist.filter(c=>c.required&&!c.present);
@@ -208,20 +240,24 @@ async function viewSubmission(id){const d=await api('/api/submissions/'+id);
     <div class="flex gap-1.5 mt-2.5">
       <button class="${c.feedback==='correct'?PS:GS}" onclick="checkFeedback(${c.id},'correct',${d.id})">맞음</button>
       <button class="${c.feedback==='wrong'?PS:GS}" onclick="checkFeedback(${c.id},'wrong',${d.id})">틀림</button></div></div>`).join('');
+  FEED_FILE={};
   $('#main').innerHTML=`
-  ${card(`<div class="flex items-center gap-3 flex-wrap mb-4">
+  ${card(`<div class="flex items-center gap-3 flex-wrap mb-1">
       <h2 class="text-[19px] font-extrabold">${esc(d.name)}</h2>${badge(d.status,d.status)}
-      <span class="text-[13px] text-[#8B95A1]">심사 기준일 <b class="text-[#191F28]">${esc(d.base_date||'')}</b></span></div>`+subFlow(d),'mb-5')}
-  ${gantt(d)}
+      <span class="text-[13px] text-[#8B95A1]">심사 기준일 <b class="text-[#191F28]">${esc(d.base_date||'')}</b></span></div>
+    ${d.current_step?`<p class="text-[13px] font-semibold text-[#3182F6] mt-2 flex items-center gap-2"><span class="w-2 h-2 rounded-full bg-[#3182F6] animate-pulse"></span>${esc(d.current_step)}</p>`
+      :`<p class="text-[13px] text-[#8B95A1] mt-2">처리 완료 — 파일 ${d.files.length}건, 탐지 ${d.feed.reduce((n,f)=>n+(f.detections||[]).length,0)}건</p>`}
+    <details class="mt-3"><summary class="text-[12px] text-[#8B95A1] cursor-pointer select-none">처리 파이프라인 상세 보기</summary>
+      <div class="mt-3">${subFlow(d)}</div></details>`,'mb-5')}
+  ${(()=>{const g=gantt(d);return g?`<details class="mb-5"><summary class="text-[12px] text-[#8B95A1] cursor-pointer select-none px-1">처리 타임라인 (Gantt) 보기</summary><div class="mt-2">${g}</div></details>`:''})()}
   <div class="grid lg:grid-cols-[1fr_420px] gap-5 items-start">
-  <section class="space-y-3">
-    ${card(h2(`파일 ${d.files.length}건`)+`<div class="space-y-2.5">${d.files.map(f=>`
-      <div class="rounded-2xl border border-[#F2F4F6] hover:border-[#3182F6]/40 hover:bg-[#F9FAFB] p-4 cursor-pointer transition" onclick="location.hash='#file/${f.id}'">
-        <div class="flex items-center justify-between gap-2 mb-1">
-          <p class="text-[13.5px] font-bold truncate">${esc(f.filename)}</p>
-          <span class="flex gap-1.5 shrink-0">${f.golden_count?badge('골든 '+f.golden_count,'golden'):''}${badge(f.status,f.status)}</span></div>
-        <p class="text-[12px] text-[#8B95A1] mb-2.5">${esc(f.doc_type||'유형 미판별')}${f.status==='detected'&&!f.doc_type_registered?' '+badge('미등록 유형','uncertain'):''} · ${f.page_count}p · 탐지 ${f.detection_count}건${f.error?` · <span class="text-[#F04452]">${esc(f.error)}</span>`:''}</p>
-        ${fileDag(f)}</div>`).join('')}</div>`)}
+  <section class="space-y-5">
+    ${card(h2(`라이브 탐지 피드`)+
+      hint('문서별로 AI 가 지금 무엇을 탐지하고 있는지, 페이지 위 빨간 박스로 실시간 확인해요. 파일이 끝날 때마다 카드가 쌓여요.')+
+      `<div class="space-y-3">${d.feed.map(feedCard).join('')||'<p class="text-[13px] text-[#8B95A1]">탐지 완료된 파일이 아직 없어요…</p>'}</div>`)}
+    ${card(h2(`증거 로그 <span class="text-[12px] font-bold text-[#7048E8] bg-[#F0EBFD] px-2 py-0.5 rounded-full">감사 기록</span>`)+
+      hint('AI 판단과 사람 확인이 시간순으로 append 되는 불변 기록이에요 — 무엇을 봤고, 언제 누가 확정했는지 전부 남아요.')+
+      `<div id="auditlog" class="max-h-[60vh] overflow-auto">불러오는 중…</div>`)}
   </section>
   <section class="space-y-5">
     ${card(h2(`필수서류 완비 체크 ${missing.length?badge('필수 '+missing.length+'종 누락','fail'):badge('완비','pass')}`)+
@@ -239,7 +275,14 @@ async function viewSubmission(id){const d=await api('/api/submissions/'+id);
             <span class="text-[12px] font-bold ${multi?'text-[#E8730A]':'text-[#8B95A1]'}">${multi?'값 '+vals.length+'종 — 확인 필요':(vals[0]?vals[0].n+'개 파일':'')}</span></div>
           ${vals.map(v=>`<div class="flex justify-between text-[12.5px] mt-1"><span class="font-mono text-[#4E5968] truncate mr-2">${esc(v.val)}</span><span class="text-[#8B95A1] shrink-0">${v.n}개</span></div>`).join('')}</div>`}).join('')||'<p class="text-[13px] text-[#8B95A1]">탐지 결과 대기 중…</p>'}</div>`)}
   </section></div>`;
+  loadAudit(id);
   if(d.status==='processing')pollTimer=setInterval(async()=>{viewSubmission(id)},3000)}
+
+async function loadAudit(subId){
+  const events=await api('/api/submissions/'+subId+'/audit');
+  const el=$('#auditlog');if(!el)return;
+  el.innerHTML=events.length?events.slice().reverse().map(auditRow).join(''):
+    '<p class="text-[13px] text-[#8B95A1]">아직 이벤트 없음.</p>';}
 
 let FD=null;
 async function viewFile(id){FD=await api('/api/files/'+id);
@@ -254,14 +297,18 @@ async function viewFile(id){FD=await api('/api/files/'+id);
       <img src="/pageimg/${p.id}" loading="lazy" class="w-full block">${boxes}
       <span class="absolute right-2.5 bottom-2 text-[11px] text-[#8B95A1] bg-white/80 px-1.5 rounded">p${p.page_no}</span></div>`}).join('');
   const detsHtml=dets.map(dd=>`<div class="rounded-2xl border ${dd.feedback==='correct'?'border-[#00A05C]/30':dd.feedback==='wrong'?'border-[#E5E8EB] opacity-60':'border-[#F2F4F6]'} p-3.5" id="det${dd.id}">
-    <div class="flex items-center justify-between gap-2 flex-wrap">
-      <span class="flex items-center gap-2"><b class="text-[13.5px]">${esc(dd.field)}</b>${dd.verdict?badge(dd.verdict,dd.verdict):''}</span>
-      <span class="text-[11px] text-[#8B95A1]">p${dd.page_no} · ${(dd.confidence??0).toFixed(2)}</span></div>
-    <p class="font-mono text-[12.5px] text-[#4E5968] my-1.5 break-all">${esc(dd.value)}</p>
-    <div class="flex gap-1.5 items-center">
-      <button class="${dd.feedback==='correct'?PS:GS}" onclick="feedback(${dd.id},'correct')">맞음</button>
-      <button class="${dd.feedback==='wrong'?PS:GS}" onclick="feedback(${dd.id},'wrong')">틀림</button>
-      <input placeholder="정정 값" value="${esc(dd.corrected_value)}" onchange="feedback(${dd.id},'wrong',this.value)" class="${INP} !py-1.5 !text-[12px] flex-1"></div></div>`).join('');
+    <div class="flex gap-3">
+      ${dd.crop_path?`<img src="/cropimg/${dd.id}" onclick="focusDet(${dd.id})" class="w-14 h-14 object-cover rounded-lg border border-[#E5E8EB] shrink-0 cursor-pointer">`:''}
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center justify-between gap-2 flex-wrap">
+          <span class="flex items-center gap-2"><b class="text-[13.5px]">${esc(dd.field)}</b>${dd.verdict?badge(dd.verdict,dd.verdict):''}</span>
+          <span class="text-[11px] text-[#8B95A1]">p${dd.page_no} · ${(dd.confidence??0).toFixed(2)}</span></div>
+        <p class="font-mono text-[12.5px] text-[#4E5968] my-1.5 break-all">${esc(dd.value)}</p>
+        <div class="flex gap-1.5 items-center">
+          <button class="${dd.feedback==='correct'?PS:GS}" onclick="feedback(${dd.id},'correct')">맞음</button>
+          <button class="${dd.feedback==='wrong'?PS:GS}" onclick="feedback(${dd.id},'wrong')">틀림</button>
+          <input placeholder="정정 값" value="${esc(dd.corrected_value)}" onchange="feedback(${dd.id},'wrong',this.value)" class="${INP} !py-1.5 !text-[12px] flex-1"></div>
+      </div></div></div>`).join('');
   const unregHtml=FD.status==='detected'&&!FD.doc_type_registered?`
     <div class="rounded-2xl border border-[#E8730A]/30 bg-[#FFF4E5]/40 p-4 mb-3">
       <p class="text-[13.5px] font-bold text-[#E8730A]">미등록 유형: ${esc(FD.doc_type||'미상')}</p>

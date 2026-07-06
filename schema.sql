@@ -126,3 +126,31 @@ ALTER TABLE files ADD COLUMN IF NOT EXISTS doc_type_evidence text NOT NULL DEFAU
 ALTER TABLE submissions ADD COLUMN IF NOT EXISTS base_date date NOT NULL DEFAULT CURRENT_DATE;  -- 심사 기준일 (날짜 판정 기준)
 ALTER TABLE submissions ADD COLUMN IF NOT EXISTS timings jsonb NOT NULL DEFAULT '{}';           -- {convert:[t0,t1], checks:[t0,t1]}
 ALTER TABLE files ADD COLUMN IF NOT EXISTS timings jsonb NOT NULL DEFAULT '{}';                 -- {render:[t0,t1], detect:[t0,t1]}
+ALTER TABLE detections ADD COLUMN IF NOT EXISTS crop_path text NOT NULL DEFAULT '';             -- AI 가 실제로 본 영역을 크롭한 증거 이미지
+ALTER TABLE detections ADD COLUMN IF NOT EXISTS prompt_version text NOT NULL DEFAULT '';
+
+-- 증거 감사 로그 (append-only): detections 는 "현재 상태 캐시", 이 테이블은 "불변 이력".
+-- detections 에 UPDATE 가 일어날 때마다(탐지 생성, 사람 피드백) 스냅샷을 append 한다.
+-- redetect 로 detections 행이 지워져도 crop_path·값을 denormalize 해뒀으므로 증거가 남는다.
+CREATE TABLE IF NOT EXISTS detection_events (
+  id serial PRIMARY KEY,
+  submission_id int NOT NULL REFERENCES submissions(id),
+  file_id int NOT NULL REFERENCES files(id),
+  detection_id int REFERENCES detections(id) ON DELETE SET NULL,
+  event_type text NOT NULL,          -- detected | feedback
+  page_no int NOT NULL DEFAULT 1,
+  rule_id int,
+  field text NOT NULL DEFAULT '',
+  value text NOT NULL DEFAULT '',
+  verdict text NOT NULL DEFAULT '',
+  box int[] NOT NULL DEFAULT '{}',
+  crop_path text NOT NULL DEFAULT '',
+  confidence real NOT NULL DEFAULT 0,
+  model text NOT NULL DEFAULT '',
+  prompt_version text NOT NULL DEFAULT '',
+  feedback text NOT NULL DEFAULT '',
+  corrected_value text NOT NULL DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS detection_events_submission_created_idx
+  ON detection_events (submission_id, created_at, id);

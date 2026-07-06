@@ -83,6 +83,24 @@ def connect() -> psycopg.Connection:
 def migrate() -> None:
     with connect() as conn:
         conn.execute((BASE / "schema.sql").read_text(encoding="utf-8"))
+        backfill_legacy_feedback(conn)
+
+
+def backfill_legacy_feedback(conn) -> None:
+    """detection_events 도입 전에 쌓인 feedback 을 1회 소급 적재 (감사 로그 완결성).
+    멱등: 이미 해당 detection_id 의 feedback 이벤트가 있으면 건너뛴다."""
+    conn.execute(
+        "INSERT INTO detection_events (submission_id, file_id, detection_id, event_type, "
+        " page_no, rule_id, field, value, verdict, box, crop_path, confidence, model, "
+        " prompt_version, feedback, corrected_value, created_at) "
+        "SELECT f.submission_id, d.file_id, d.id, 'feedback', d.page_no, d.rule_id, d.field, "
+        " d.value, d.verdict, d.box, d.crop_path, d.confidence, d.model, d.prompt_version, "
+        " d.feedback, d.corrected_value, d.created_at "
+        "FROM detections d JOIN files f ON f.id = d.file_id "
+        "WHERE d.feedback <> '' "
+        "AND NOT EXISTS (SELECT 1 FROM detection_events e "
+        "                WHERE e.detection_id = d.id AND e.event_type = 'feedback')"
+    )
 
 
 def seed() -> None:

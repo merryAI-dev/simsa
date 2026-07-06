@@ -209,6 +209,19 @@ function feedScreen(f){
     <p class="text-[12px] text-[#8B95A1] mt-0.5">${esc(f.doc_type||'유형 미판별')} · 탐지 ${(f.detections||[]).length}건${f.error?` · <span class="text-[#F04452]">${esc(f.error)}</span>`:''}</p>
     ${img}</div>`}
 
+// 개표 참관 화면: AI 가 지금 보고 있는 문서 — 박스가 아직 없는 원본 그대로
+function currentScreen(c){
+  const img=c.page?`<div class="relative rounded-xl overflow-hidden border-2 border-[#3182F6]/50 mt-2.5 w-[300px]">
+      <img src="/pageimg/${c.page.id}" class="w-full block">
+      <span class="absolute top-2 left-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-[#3182F6] text-white">
+        <span class="w-1.5 h-1.5 rounded-full bg-white animate-ping"></span>AI 확인 중</span></div>`
+    :`<p class="text-[12px] text-[#8B95A1] mt-2">페이지 준비 중…</p>`;
+  return `<div class="rounded-2xl border border-[#3182F6]/30 bg-[#E8F3FF]/30 p-4">
+    <div class="flex items-center justify-between gap-2">
+      <p class="text-[13.5px] font-bold truncate">${esc(c.filename)}</p>
+      <span class="shrink-0">${badge('지금 개표 중','processing')}</span></div>
+    ${img}</div>`}
+
 function feedLogRow(f){
   return `<div class="flex items-center gap-2 py-[5px] border-b border-[#F2F4F6] last:border-0 cursor-pointer hover:bg-[#F9FAFB] rounded-lg px-1" onclick="location.hash='#file/${f.file_id}'">
     <span class="${f.status==='error'?'text-[#F04452]':'text-[#00A05C]'} font-bold text-[12px] shrink-0">${f.status==='error'?'✗':'✓'}</span>
@@ -257,8 +270,11 @@ async function viewSubmission(id){const d=await api('/api/submissions/'+id);
   <div class="grid lg:grid-cols-[1fr_420px] gap-5 items-start">
   <section class="space-y-5">
     ${card(h2(`라이브 탐지 피드`)+
-      hint('방금 처리된 문서 하나만 화면으로 보여주고, 지나간 파일은 아래 로그로 쌓여요 — 개표 상황판처럼.')+
-      (d.feed.length?feedScreen(d.feed[d.feed.length-1]):'<p class="text-[13px] text-[#8B95A1]">탐지 완료된 파일이 아직 없어요…</p>')+
+      hint('AI 가 지금 보고 있는 문서를 그대로 보여주고, 탐지가 끝나면 박스가 박힌 화면으로 바뀐 뒤 로그로 내려가요 — 개표 참관처럼.')+
+      `<div class="space-y-3">`+
+      (d.current?currentScreen(d.current):'')+
+      (d.feed.length?feedScreen(d.feed[d.feed.length-1]):(d.current?'':'<p class="text-[13px] text-[#8B95A1]">탐지 완료된 파일이 아직 없어요…</p>'))+
+      `</div>`+
       (d.feed.length>1?`<p class="text-[12px] font-bold text-[#4E5968] mt-4 mb-1">처리 로그</p>
         <div>${d.feed.slice(0,-1).reverse().map(feedLogRow).join('')}</div>`:''))}
     ${card(h2(`증거 로그 <span class="text-[12px] font-bold text-[#7048E8] bg-[#F0EBFD] px-2 py-0.5 rounded-full">감사 기록</span>`)+

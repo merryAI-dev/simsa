@@ -95,6 +95,8 @@ def detect_file(conn, file_id: int, pdf: Path, rules: list[dict], doc_types: lis
                 (file_id, p["page_no"], p["image_path"], p["width"], p["height"]),
             )
         conn.execute("UPDATE files SET page_count = %s WHERE id = %s", (len(pages), file_id))
+        # 페이지를 먼저 커밋 — VLM 이 문서를 보는 동안 사람도 같은 문서를 화면에서 본다 (개표 참관)
+        conn.commit()
     t0 = time.time()
     result, _ = detect(pdf, rules, doc_types, cache, api_key)
     timings["detect"] = [t0, time.time()]
@@ -420,8 +422,15 @@ class Handler(BaseHTTPRequestHandler):
             # 라이브 탐지 피드: DAG 대신 "지금 무엇을 보고 있는가"를 보여준다.
             # 파일은 순차 처리되므로 status='pending' 인 파일이 곧 지금 처리 중인 파일.
             current = next((f for f in sub["files"] if f["status"] == "pending"), None)
+            sub["current"] = None
             if current:
                 sub["current_step"] = f"지금 탐지 중: {current['filename']}"
+                # 개표 참관: 지금 AI 가 보고 있는 문서의 첫 페이지 (렌더 커밋 후부터 보임)
+                cpage = conn.execute(
+                    "SELECT id, page_no, width, height FROM pages WHERE file_id = %s "
+                    "ORDER BY page_no LIMIT 1", (current["id"],),
+                ).fetchone()
+                sub["current"] = {"file_id": current["id"], "filename": current["filename"], "page": cpage}
             elif sub["status"] == "processing":
                 # 파일 사이 짧은 틈(방금 끝난 파일 커밋 ~ 다음 파일 INSERT)일 수 있음
                 sub["current_step"] = "다음 파일 준비 중…" if sub["timings"].get("convert") else "문서 변환 중…"

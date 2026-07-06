@@ -127,7 +127,7 @@ def call_gemini(pdf: Path, api_key: str, log, ctx: dict, model: str = MODEL) -> 
         t0 = time.monotonic()
         try:
             resp = requests.post(
-                url_for(model), json=body, timeout=180,
+                url_for(model), json=body, timeout=300,  # 대형 PDF(30p 제안서) 대비
                 headers={"Content-Type": "application/json", "X-goog-api-key": api_key},
             )
             ms = int((time.monotonic() - t0) * 1000)

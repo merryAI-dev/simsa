@@ -27,9 +27,9 @@ from urllib.parse import urlparse
 from PIL import Image
 
 import db
-from detect_fields import PROMPT_VERSION, check_submission, detect, render_pages, suggest_rules
+from detect_fields import (PROMPT_VERSION, check_submission, detect, load_api_key,
+                           render_pages, suggest_rules)
 from vlm_cache import VLMCache
-from vlm_screen import load_api_key
 
 BASE = Path(__file__).parent
 DATA = BASE / "data/review"
@@ -567,6 +567,9 @@ class Handler(BaseHTTPRequestHandler):
                         (body.get("feedback") or "", body.get("corrected_value") or "", det_id),
                     )
                     d = conn.execute("SELECT * FROM detections WHERE id = %s", (det_id,)).fetchone()
+                    if not d:  # 재탐지로 사라진 탐지에 대한 피드백 (화면이 낡은 경우)
+                        return self.send_json({"error": "탐지가 재탐지로 교체됐어요. 화면을 새로고침하세요."},
+                                              HTTPStatus.NOT_FOUND)
                     f = conn.execute("SELECT submission_id FROM files WHERE id = %s", (d["file_id"],)).fetchone()
                     # 감사 로그는 append-only: 맞음→틀림→정정 순서로 여러 번 눌러도 매번 새 이벤트로 쌓인다
                     conn.execute(

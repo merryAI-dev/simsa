@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -20,9 +21,22 @@ import fitz
 import requests
 
 from vlm_cache import VLMCache
-from vlm_screen import load_api_key
 
 BASE = Path(__file__).parent
+
+
+def load_api_key() -> str:
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key:
+        env = BASE / ".env"
+        if env.exists():
+            for line in env.read_text().splitlines():
+                if line.startswith("GEMINI_API_KEY="):
+                    key = line.split("=", 1)[1].strip()
+    if not key:
+        sys.exit("GEMINI_API_KEY 가 없습니다. .env 또는 환경변수로 설정하세요.")
+    return key
+
 MODEL = "gemini-flash-latest"
 CHECK_MODEL = "gemini-pro-latest"  # 종합 검사는 추론이라 pro
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"

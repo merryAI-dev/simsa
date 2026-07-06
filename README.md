@@ -3,13 +3,11 @@
 업로드 → 문서 유형 판별 → 규칙 기반 필드 탐지(box_2d) → 검토 → 골든셋 확정까지, 팩(규칙 세트)만
 갈아끼우면 어떤 서류 심사에도 쓸 수 있는 플랫폼입니다. 규칙·탐지·정답은 PostgreSQL에 저장됩니다.
 
-> **KOICA CTS 전용 파이프라인(문서 변환·VLM 심사·엑셀 리포트)은
-> [merryAI-dev/cts-screening](https://github.com/merryAI-dev/cts-screening)으로 분리됐습니다.**
-> `web_app.py`/`excel_report.py`/`screen_batch.py`/`cross_check.py`/`normalize_files.py`와
-> 공유 모듈(`converter.py`/`format_detect.py`/`vlm_cache.py`/`vlm_screen.py`/`batch_convert.py`)의
-> 사본이 그 repo로 옮겨졌습니다. 이 repo에는 당분간 원본이 그대로 남아있지만
-> **앞으로 CTS 관련 작업은 새 repo에서** 하고, 이 repo의 사본은 정리될 예정입니다
-> ([이슈 #4](https://github.com/merryAI-dev/simsa/issues/4) 참고). 아래는 simsa 플랫폼(review_app) 설명입니다.
+> **KOICA CTS 전용 파이프라인은 [merryAI-dev/cts-screening](https://github.com/merryAI-dev/cts-screening)에 있습니다.**
+> 이 repo에는 CTS 전용 코드가 없습니다 — `web_app.py`/`excel_report.py`/`screen_batch.py`/
+> `cross_check.py`/`normalize_files.py`/`criteria/` 는 전부 그쪽으로 이전·삭제됐습니다.
+> 문서 변환 모듈(`converter.py`/`format_detect.py`/`batch_convert.py`)과 `vlm_cache.py` 는
+> 두 repo 가 각자 사본을 유지합니다 (동기화 없음). **CTS 관련 작업은 반드시 cts-screening 에서.**
 
 ## 요구 환경
 

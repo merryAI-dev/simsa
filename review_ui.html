@@ -285,6 +285,7 @@ async function viewSubmission(id){const d=await api('/api/submissions/'+id);
       ${c.present?'<span class="text-[var(--text-success)] font-medium">✓</span>':(c.required?'✗':'–')} ${esc(c.name)}</span>
     <span class="text-[12px] text-[var(--text-muted)]">${c.files.length?c.files.length+'건':''}</span></div>`;
   const vb=v=>badge(v,v);
+  const streaming=d.status==='processing';
   const checksHtml=(d.checks||[]).map(c=>`<div class="rounded-2xl border ${c.verdict==='fail'?'border-[var(--border-danger)]/60 bg-[var(--bg-danger)]/40':c.verdict==='uncertain'?'border-[var(--border-warning)]/60 bg-[var(--bg-warning)]/40':'border-[var(--border)]'} p-4 ${c.feedback==='wrong'?'opacity-50':''}">
     <div class="flex items-center gap-2 flex-wrap">${vb(c.verdict)}<b class="text-[14px] font-medium">${esc(c.name)}</b></div>
     <p class="text-[13px] text-[var(--text-secondary)] mt-1.5 leading-relaxed">${esc(c.evidence)}</p>
@@ -303,14 +304,18 @@ async function viewSubmission(id){const d=await api('/api/submissions/'+id);
   ${(()=>{const g=gantt(d);return g?`<details class="mb-5"><summary class="text-[12px] text-[var(--text-muted)] cursor-pointer select-none px-1">처리 타임라인 (Gantt) 보기</summary><div class="mt-2">${g}</div></details>`:''})()}
   <div class="grid lg:grid-cols-[1fr_420px] gap-5 items-start">
   <section class="space-y-5">
-    ${card(h2(`라이브 탐지 피드`)+
+    ${card(h2(`라이브 탐지 피드${streaming?' <span id="qbadge"></span>':''}`)+
       hint('AI 가 지금 보고 있는 문서를 그대로 보여주고, 탐지가 끝나면 박스가 박힌 화면으로 바뀐 뒤 로그로 내려가요 — 개표 참관처럼.')+
-      `<div class="space-y-3">`+
-      (d.current?currentScreen(d.current):'')+
-      (d.feed.length?feedScreen(d.feed[d.feed.length-1]):(d.current?'':'<p class="text-[13px] text-[var(--text-muted)]">탐지 완료된 파일이 아직 없어요…</p>'))+
-      `</div>`+
-      (d.feed.length>1?`<p class="text-[12px] font-medium text-[var(--text-secondary)] mt-4 mb-1">처리 로그</p>
-        <div>${d.feed.slice(0,-1).reverse().map(feedLogRow).join('')}</div>`:''))}
+      (streaming
+        ? `<div id="livecurrent" class="space-y-3"></div>
+           <div id="livetally" class="mt-3"></div>
+           <p class="text-[12px] font-medium text-[var(--text-secondary)] mt-4 mb-1">처리 로그</p>
+           <div id="livelog"></div>`
+        : `<div class="space-y-3">`+
+          (d.feed.length?feedScreen(d.feed[d.feed.length-1]):'<p class="text-[13px] text-[var(--text-muted)]">탐지 완료된 파일이 아직 없어요…</p>')+
+          `</div>`+
+          (d.feed.length>1?`<p class="text-[12px] font-medium text-[var(--text-secondary)] mt-4 mb-1">처리 로그</p>
+            <div>${d.feed.slice(0,-1).reverse().map(feedLogRow).join('')}</div>`:'')))}
     ${card(h2(`증거 로그 <span class="text-[12px] font-medium text-[var(--text-pro)] bg-[var(--bg-pro)] px-2 py-0.5 rounded-full">감사 기록</span>`)+
       hint('AI 판단과 사람 확인이 시간순으로 append 되는 불변 기록이에요 — 무엇을 봤고, 언제 누가 확정했는지 전부 남아요.')+
       `<div id="auditlog" class="max-h-[60vh] overflow-auto">불러오는 중…</div>`)}
@@ -331,8 +336,41 @@ async function viewSubmission(id){const d=await api('/api/submissions/'+id);
             <span class="text-[12px] font-medium ${multi?'text-[var(--text-warning)]':'text-[var(--text-muted)]'}">${multi?'값 '+vals.length+'종 — 확인 필요':(vals[0]?vals[0].n+'개 파일':'')}</span></div>
           ${vals.map(v=>`<div class="flex justify-between text-[12.5px] mt-1"><span class="font-mono text-[var(--text-secondary)] truncate mr-2">${esc(v.val)}</span><span class="text-[var(--text-muted)] shrink-0">${v.n}개</span></div>`).join('')}</div>`}).join('')||'<p class="text-[13px] text-[var(--text-muted)]">탐지 결과 대기 중…</p>'}</div>`)}
   </section></div>`;
-  loadAudit(id);
-  if(d.status==='processing')pollTimer=setInterval(async()=>{viewSubmission(id)},3000)}
+  if(streaming){startStream(id);}
+  else{loadAudit(id);}}
+
+// ── 파일 스트리밍: 커서 증분 폴링(백엔드) + FIFO 재생 큐(프론트) ──
+// LLM 이 빨라져 완료가 폭주해도, 백엔드는 커서 이후 배치만 보내고 큐가 사람 눈 속도로 재생한다.
+let PLAYQ=[],PLAYING=false,CURSOR=0,POLLDONE=false,STREAMID=null,SEEN=new Set();
+function startStream(id){
+  clearInterval(pollTimer);  // orphan 인터벌 방지 (재진입 시 이중 폴링 차단)
+  PLAYQ=[];PLAYING=false;CURSOR=0;POLLDONE=false;STREAMID=id;SEEN=new Set();
+  pollProgress();pollTimer=setInterval(pollProgress,1000);}  // progress 가 가벼워 1초 폴링도 부담 없음
+async function pollProgress(){const id=STREAMID;
+  let d;try{d=await api(`/api/submissions/${id}/progress?after=${CURSOR}`);}catch(e){return;}
+  const cur=$('#livecurrent');
+  if(cur)cur.innerHTML=d.current?currentScreen(d.current):(PLAYQ.length||PLAYING?'':'<p class="text-[13px] text-[var(--text-muted)]">문서 준비 중…</p>');
+  // 커서는 응답 배치 전체를 반영해 한 번만 전진 (중간에 갱신하면 재진입 시 일부를 건너뛸 수 있음).
+  // SEEN 으로 파일 id 중복 push 를 이중 방어한다.
+  d.new_files.forEach(f=>{if(SEEN.has(f.file_id))return;SEEN.add(f.file_id);PLAYQ.push(f);});
+  if(d.new_files.length)CURSOR=Math.max(CURSOR,...d.new_files.map(f=>f.file_id));
+  const qb=$('#qbadge');if(qb)qb.innerHTML=PLAYQ.length>2?badge('대기 '+PLAYQ.length,'processing'):'';
+  playLoop();
+  if(d.done){POLLDONE=true;maybeFinish();}}
+function playLoop(){
+  if(PLAYING)return;
+  const f=PLAYQ.shift();
+  if(!f){maybeFinish();return;}
+  PLAYING=true;
+  const tally=$('#livetally');if(tally)tally.innerHTML=feedScreen({...f,file_id:f.file_id});
+  const qb=$('#qbadge');if(qb)qb.innerHTML=PLAYQ.length>2?badge('대기 '+PLAYQ.length,'processing'):'';
+  // 큐가 밀리면 체류시간을 줄여 따라잡되(가속), 최소 350ms 는 보장 — 사람이 각 파일을 인지
+  const dwell=PLAYQ.length>5?350:PLAYQ.length>2?700:1400;
+  setTimeout(()=>{const lg=$('#livelog');if(lg)lg.insertAdjacentHTML('afterbegin',feedLogRow({...f,file_id:f.file_id}));
+    if(tally)tally.innerHTML='';PLAYING=false;playLoop();},dwell);}
+function maybeFinish(){
+  if(POLLDONE&&!PLAYING&&PLAYQ.length===0){clearInterval(pollTimer);
+    if(STREAMID)viewSubmission(STREAMID);}}  // 완료 → 전체 뷰(체크리스트·종합검사·audit)를 한 번만 로드
 
 async function loadAudit(subId){
   const events=await api('/api/submissions/'+subId+'/audit');

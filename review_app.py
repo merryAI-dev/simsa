@@ -22,7 +22,7 @@ from email.policy import default
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from PIL import Image
 
@@ -434,6 +434,9 @@ class Handler(BaseHTTPRequestHandler):
                                       HTTPStatus.OK if run else HTTPStatus.NOT_FOUND)
             if path.startswith("/api/submissions/") and path.endswith("/audit"):
                 return self.get_audit(int(path.split("/")[3]))
+            if path.startswith("/api/submissions/") and path.endswith("/progress"):
+                after = int(parse_qs(urlparse(self.path).query).get("after", ["0"])[0])
+                return self.get_progress(int(path.split("/")[3]), after)
             if path.startswith("/api/submissions/"):
                 return self.get_submission(int(path.rsplit("/", 1)[-1]))
             if path.startswith("/api/files/"):
@@ -589,6 +592,44 @@ class Handler(BaseHTTPRequestHandler):
             pack["doc_types"] = pack_doc_types(conn, pack_id)
             pack["rules"] = pack_rules(conn, pack_id)
         self.send_json({"pack": pack, "run": run})
+
+    def get_progress(self, sub_id: int, after: int) -> None:
+        """경량 스트리밍 진행 상태 — 파일 id 커서 증분.
+        체크리스트·교차집계·audit·feed 를 제외해, 폴링 비용이 파일 처리 속도와 무관하게 일정하다.
+        after 이후로 새로 완료(detected/error)된 파일만 반환하므로 LLM 이 아무리 빨라도
+        한 폴링의 페이로드는 '그 간격에 끝난 파일 수'에만 비례한다."""
+        with db.connect() as conn:
+            sub = conn.execute("SELECT status FROM submissions WHERE id = %s", (sub_id,)).fetchone()
+            if not sub:
+                return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            # 지금 개표 중(pending) — 병렬 처리로 여럿이어도 첫 번째를 대표로 (사람은 하나씩 본다)
+            cur = conn.execute(
+                "SELECT f.filename, "
+                " (SELECT p.id FROM pages p WHERE p.file_id = f.id ORDER BY p.page_no LIMIT 1) AS page_id "
+                "FROM files f WHERE f.submission_id = %s AND f.status = 'pending' ORDER BY f.id LIMIT 1",
+                (sub_id,),
+            ).fetchone()
+            rows = conn.execute(
+                "SELECT f.id AS file_id, f.filename, f.doc_type, f.status, "
+                " (SELECT p.id FROM pages p WHERE p.file_id = f.id ORDER BY p.page_no LIMIT 1) AS page_id, "
+                " (SELECT p.page_no FROM pages p WHERE p.file_id = f.id ORDER BY p.page_no LIMIT 1) AS first_no "
+                "FROM files f WHERE f.submission_id = %s AND f.id > %s AND f.status IN ('detected', 'error') "
+                "ORDER BY f.id", (sub_id, after),
+            ).fetchall()
+            for r in rows:
+                pno = r.pop("first_no", None)
+                r["page"] = {"id": r.pop("page_id")} if r.get("page_id") else None
+                r["detections"] = conn.execute(
+                    "SELECT field, box, feedback FROM detections WHERE file_id = %s AND page_no = %s ORDER BY id",
+                    (r["file_id"], pno or 1),
+                ).fetchall() if pno else []
+        self.send_json({
+            "status": sub["status"],
+            "done": sub["status"] in ("ready", "error"),
+            "current": ({"filename": cur["filename"],
+                         "page": {"id": cur["page_id"]} if cur["page_id"] else None} if cur else None),
+            "new_files": rows,
+        })
 
     def get_audit(self, sub_id: int) -> None:
         """시간순 append-only 증거 로그 — AI 가 실제로 본 것 + 사람 확정 이력."""

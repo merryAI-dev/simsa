@@ -503,7 +503,7 @@ class Handler(BaseHTTPRequestHandler):
             ).fetchall()
             # 라이브 탐지 피드: DAG 대신 "지금 무엇을 보고 있는가"를 보여준다.
             # 파일은 순차 처리되므로 status='pending' 인 파일이 곧 지금 처리 중인 파일.
-            current = next((f for f in sub["files"] if f["status"] == "pending"), None)
+            current = next((f for f in sub["files"] if f["status"] == "pending"), None) if sub["status"] == "processing" else None
             sub["current"] = None
             if current:
                 sub["current_step"] = f"지금 탐지 중: {current['filename']}"
@@ -603,12 +603,14 @@ class Handler(BaseHTTPRequestHandler):
             if not sub:
                 return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
             # 지금 개표 중(pending) — 병렬 처리로 여럿이어도 첫 번째를 대표로 (사람은 하나씩 본다)
-            cur = conn.execute(
-                "SELECT f.filename, "
-                " (SELECT p.id FROM pages p WHERE p.file_id = f.id ORDER BY p.page_no LIMIT 1) AS page_id "
-                "FROM files f WHERE f.submission_id = %s AND f.status = 'pending' ORDER BY f.id LIMIT 1",
-                (sub_id,),
-            ).fetchone()
+            cur = None
+            if sub["status"] == "processing":
+                cur = conn.execute(
+                    "SELECT f.filename, "
+                    " (SELECT p.id FROM pages p WHERE p.file_id = f.id ORDER BY p.page_no LIMIT 1) AS page_id "
+                    "FROM files f WHERE f.submission_id = %s AND f.status = 'pending' ORDER BY f.id LIMIT 1",
+                    (sub_id,),
+                ).fetchone()
             rows = conn.execute(
                 "SELECT f.id AS file_id, f.filename, f.doc_type, f.status, "
                 " (SELECT p.id FROM pages p WHERE p.file_id = f.id ORDER BY p.page_no LIMIT 1) AS page_id, "

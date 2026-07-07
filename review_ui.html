@@ -336,15 +336,20 @@ async function viewSubmission(id){const d=await api('/api/submissions/'+id);
             <span class="text-[12px] font-medium ${multi?'text-[var(--text-warning)]':'text-[var(--text-muted)]'}">${multi?'값 '+vals.length+'종 — 확인 필요':(vals[0]?vals[0].n+'개 파일':'')}</span></div>
           ${vals.map(v=>`<div class="flex justify-between text-[12.5px] mt-1"><span class="font-mono text-[var(--text-secondary)] truncate mr-2">${esc(v.val)}</span><span class="text-[var(--text-muted)] shrink-0">${v.n}개</span></div>`).join('')}</div>`}).join('')||'<p class="text-[13px] text-[var(--text-muted)]">탐지 결과 대기 중…</p>'}</div>`)}
   </section></div>`;
-  if(streaming){startStream(id);}
+  if(streaming){
+    const latest=d.feed.slice(-20).reverse();
+    const log=$('#livelog');
+    if(log)log.innerHTML=latest.map(feedLogRow).join('');
+    startStream(id, d.feed.reduce((m,f)=>Math.max(m,f.file_id||0),0));
+  }
   else{loadAudit(id);}}
 
 // ── 파일 스트리밍: 커서 증분 폴링(백엔드) + FIFO 재생 큐(프론트) ──
 // LLM 이 빨라져 완료가 폭주해도, 백엔드는 커서 이후 배치만 보내고 큐가 사람 눈 속도로 재생한다.
 let PLAYQ=[],PLAYING=false,CURSOR=0,POLLDONE=false,STREAMID=null,SEEN=new Set();
-function startStream(id){
+function startStream(id, cursor=0){
   clearInterval(pollTimer);  // orphan 인터벌 방지 (재진입 시 이중 폴링 차단)
-  PLAYQ=[];PLAYING=false;CURSOR=0;POLLDONE=false;STREAMID=id;SEEN=new Set();
+  PLAYQ=[];PLAYING=false;CURSOR=cursor;POLLDONE=false;STREAMID=id;SEEN=new Set();
   pollProgress();pollTimer=setInterval(pollProgress,1000);}  // progress 가 가벼워 1초 폴링도 부담 없음
 async function pollProgress(){const id=STREAMID;
   let d;try{d=await api(`/api/submissions/${id}/progress?after=${CURSOR}`);}catch(e){return;}

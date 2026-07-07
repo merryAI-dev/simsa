@@ -154,3 +154,9 @@ CREATE TABLE IF NOT EXISTS detection_events (
 );
 CREATE INDEX IF NOT EXISTS detection_events_submission_created_idx
   ON detection_events (submission_id, created_at, id);
+
+-- 온보딩 플로우: 팩은 onboarding 상태로 태어나 서류 전체 집합·규칙을 사람이 확정해야 ready 가 된다.
+-- ready 전에는 일반 심사 업로드가 차단된다 (전체 집합 파악 → 이후 진행 원칙).
+ALTER TABLE packs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'ready';        -- onboarding | ready
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'screening'; -- screening | onboarding
+ALTER TABLE rules ADD COLUMN IF NOT EXISTS sensitive boolean NOT NULL DEFAULT false;     -- 민감정보: 마스킹 추출 + 증거 crop 저장 안 함

@@ -41,7 +41,7 @@ MODEL = "gemini-flash-latest"
 CHECK_MODEL = "gemini-pro-latest"  # 종합 검사는 추론이라 pro
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"
 URL = f"{API_ROOT}/{MODEL}:generateContent"
-PROMPT_VERSION = "detect-v2"
+PROMPT_VERSION = "detect-v3"  # v3: [민감] 필드 마스킹 추출 (신분증·통장 등 개인정보)
 RENDER_DPI = 150
 
 PROMPT_TEMPLATE = """당신은 정부 지원사업 제출서류 적격심사 보조원입니다.
@@ -84,7 +84,10 @@ PROMPT_TEMPLATE = """당신은 정부 지원사업 제출서류 적격심사 보
   (서명·도장 표시, 빈 서명란 등). 애매하면 uncertain — 사람 확인으로 넘어갑니다.
 - box_2d 는 해당 페이지 안에서 0~1000 으로 정규화된 [ymin, xmin, ymax, xmax] 이며
   라벨이 아니라 값 텍스트(또는 근거)를 최대한 정확히 감쌉니다.
-- 문서에 없는 필드는 넣지 마세요. 없는 것을 있다고 하지 마세요. 불확실하면 confidence 를 낮추세요."""
+- 문서에 없는 필드는 넣지 마세요. 없는 것을 있다고 하지 마세요. 불확실하면 confidence 를 낮추세요.
+- [민감] 표시가 붙은 규칙의 값은 개인정보입니다. 값을 그대로 옮기지 말고 앞 2~3자만 남기고
+  나머지를 '*' 로 마스킹해 기록하세요 (예: 주민등록번호 900101-*******, 계좌번호 110-***-****789).
+  box_2d 는 정상적으로 감싸되 value 만 마스킹합니다."""
 
 SUGGEST_PROMPT = """당신은 정부 지원사업 제출서류 적격심사 설계자입니다.
 첨부된 PDF 는 '{doc_type}' 유형의 제출서류 견본입니다.
@@ -139,9 +142,10 @@ def _pdf_part(pdf: Path) -> dict:
 
 def rules_block(rules: list[dict]) -> str:
     return "\n".join(
-        f"- {r['id']} | {r.get('rule_type', 'extract')} | {r['doc_type']} | {r['field']} | {r['instruction'] or '-'}"
+        f"- {r['id']} | {r.get('rule_type', 'extract')}{' [민감]' if r.get('sensitive') else ''}"
+        f" | {r['doc_type']} | {r['field']} | {r['instruction'] or '-'}"
         for r in rules
-    ) or "- (규칙 없음)"
+    ) or "- (규칙 없음 — 문서 유형 판별만 수행)"
 
 
 def doc_types_block(doc_types: list[dict]) -> str:
@@ -153,8 +157,8 @@ def doc_types_block(doc_types: list[dict]) -> str:
 
 def fingerprint(rules: list[dict], doc_types: list[dict]) -> str:
     payload = json.dumps([
-        [[r["id"], r["doc_type"], r["field"], r.get("rule_type", "extract"), r["instruction"]]
-         for r in sorted(rules, key=lambda r: r["id"])],
+        [[r["id"], r["doc_type"], r["field"], r.get("rule_type", "extract"), r["instruction"],
+          bool(r.get("sensitive"))] for r in sorted(rules, key=lambda r: r["id"])],
         [[t["name"], t["filename_hints"], t["description"]] for t in sorted(doc_types, key=lambda t: t["name"])],
     ], ensure_ascii=False)
     return hashlib.sha256(payload.encode()).hexdigest()[:16]

@@ -112,18 +112,29 @@ function gantt(d){
 function route(){clearInterval(pollTimer);const h=location.hash||'#home';
   if(h.startsWith('#sub/'))return viewSubmission(+h.slice(5));
   if(h.startsWith('#file/'))return viewFile(+h.slice(6));
+  if(h.startsWith('#onboard/'))return viewOnboard(+h.slice(9));
   if(h==='#golden')return viewGolden();
   viewHome()}
 window.addEventListener('hashchange',route);
 
+let CURPACK=null;
 async function viewHome(){$('#crumb').textContent='';
-  const d=await api('/api/bootstrap');const pack=d.packs[0];
+  const d=await api('/api/bootstrap');
+  const pack=d.packs.find(p=>p.id===CURPACK)||d.packs[0];CURPACK=pack.id;
+  const onb=pack.status==='onboarding';
   const fileRules=pack.rules.filter(r=>r.scope==='file'),subRules=pack.rules.filter(r=>r.scope==='submission');
-  $('#main').innerHTML=`<div class="grid lg:grid-cols-[420px_1fr] gap-5 items-start">
+  $('#main').innerHTML=`
+  <div class="flex items-center gap-2.5 mb-5 flex-wrap">
+    <select id="packsel" class="${INP} !w-[280px]">${d.packs.map(p=>`<option value="${p.id}" ${p.id===pack.id?'selected':''}>${esc(p.name)}${p.status==='onboarding'?' — 온보딩 중':''}</option>`).join('')}</select>
+    ${onb?`<a href="#onboard/${pack.id}" class="${PS} no-underline">온보딩 이어하기</a>`:''}
+    <button class="${GS}" onclick="newPack()">+ 새 심사 팩 만들기</button>
+  </div>
+  <div class="grid lg:grid-cols-[420px_1fr] gap-5 items-start">
   <section class="space-y-5">
-    ${card(h2('제출건 업로드')+`<form id="upform" class="space-y-3">
-      <div><label class="block text-[13px] font-bold text-[#4E5968] mb-1.5">심사 팩</label>
-        <select name="pack_id" class="${INP}">${d.packs.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></div>
+    ${card(h2('제출건 업로드')+
+      (onb?`<p class="text-[13px] text-[#E8730A] font-semibold bg-[#FFF4E5]/60 rounded-xl p-3">이 팩은 아직 온보딩 중이에요. <a href="#onboard/${pack.id}" class="underline">서류 집합·규칙을 확정</a>해야 심사를 시작할 수 있어요.</p>`:'')+
+      `<form id="upform" class="space-y-3 ${onb?'opacity-40 pointer-events-none':''}">
+      <input type="hidden" name="pack_id" value="${pack.id}">
       <div><label class="block text-[13px] font-bold text-[#4E5968] mb-1.5">심사 기준일 <span class="text-[#F04452]">*</span></label>
         <input type="date" name="base_date" id="basedate" class="${INP}" required>
         <p class="text-[12px] text-[#8B95A1] mt-1.5">발급일 3개월 이내 같은 <b>모든 날짜 판정의 기준</b>이 되는 날짜예요.</p></div>
@@ -154,8 +165,9 @@ async function viewHome(){$('#crumb').textContent='';
         <div class="flex items-center gap-3 py-2.5">
           ${badge(r.rule_type,r.rule_type==='verify'?'uncertain':'skipped')}
           <span class="text-[13px] text-[#8B95A1] w-[130px] shrink-0 truncate">${esc(r.doc_type)}</span>
-          <div class="min-w-0 flex-1"><p class="text-[14px] font-semibold">${esc(r.field)}</p>
+          <div class="min-w-0 flex-1"><p class="text-[14px] font-semibold">${esc(r.field)}${r.sensitive?' '+badge('민감·마스킹','fail'):''}</p>
             ${r.instruction?`<p class="text-[12px] text-[#8B95A1] truncate">${esc(r.instruction)}</p>`:''}</div>
+          <button class="${r.sensitive?PS:GS} shrink-0" onclick="toggleSensitive(${r.id})" title="민감정보: 값 마스킹 추출 + 증거 crop 저장 안 함">민감</button>
           <button class="${GS} shrink-0" onclick="delRule(${r.id})">삭제</button></div>`).join('')}</div>
       <form id="ruleform" class="flex gap-2 mt-4 flex-wrap">
         <select name="rule_type" class="${INP} !w-[100px]"><option value="extract">extract</option><option value="verify">verify</option></select>
@@ -176,6 +188,7 @@ async function viewHome(){$('#crumb').textContent='';
         <button class="${PS}">종합 규칙 추가</button></form>`)}
   </section></div>`;
   $('#basedate').value=new Date().toISOString().slice(0,10);
+  $('#packsel').addEventListener('change',e=>{CURPACK=+e.target.value;viewHome()});
   $('#ruleform').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);
     await api('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pack_id:pack.id,rule_type:f.get('rule_type'),doc_type:f.get('doc_type'),field:f.get('field'),instruction:f.get('instruction')})});viewHome()});
   $('#subruleform').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);
@@ -389,9 +402,77 @@ async function addSuggested(i){const s=SUG[i];
   await api('/api/rules',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({pack_id:FD.pack_id,rule_type:s.rule_type,doc_type:s.doc_type,field:s.field,instruction:s.instruction})});
   document.getElementById('sug'+i).style.opacity=.4;document.querySelector('#sug'+i+' button').textContent='추가됨'}
-async function delRule(id){if(!confirm('규칙을 삭제할까요?'))return;await api('/api/rules/'+id,{method:'DELETE'});viewHome()}
-async function delDocType(id){if(!confirm('문서 유형을 삭제할까요?'))return;await api('/api/doc_types/'+id,{method:'DELETE'});viewHome()}
-async function toggleDocType(id){await api('/api/doc_types/'+id+'/toggle',{method:'POST'});viewHome()}
+async function delRule(id){if(!confirm('규칙을 삭제할까요?'))return;await api('/api/rules/'+id,{method:'DELETE'});route()}
+async function delDocType(id){if(!confirm('문서 유형을 삭제할까요?'))return;await api('/api/doc_types/'+id,{method:'DELETE'});route()}
+async function toggleDocType(id){await api('/api/doc_types/'+id+'/toggle',{method:'POST'});route()}
+async function toggleSensitive(id){await api('/api/rules/'+id+'/toggle_sensitive',{method:'POST'});route()}
+async function newPack(){const name=prompt('새 심사 팩 이름 (예: 2027 창업지원 적격심사)');if(!name)return;
+  try{const r=await api('/api/packs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    CURPACK=r.id;location.hash='#onboard/'+r.id}
+  catch(e){alert(e.message)}}
+
+// ── 온보딩: 팩 생성 → 샘플 ZIP → 유형·규칙 일괄 제안 → 사람 확정 → 그 후에야 심사 ──
+async function viewOnboard(id){const d=await api('/api/packs/'+id+'/onboarding');
+  const p=d.pack,run=d.run;
+  $('#crumb').textContent='› 온보딩: '+p.name;
+  if(run&&run.status==='processing'){
+    const done=run.files.filter(f=>f.doc_type||f.status==='error').length;
+    $('#main').innerHTML=card(h2('샘플 서류 파악 중… <span class="text-[13px] font-semibold text-[#3182F6]">'+done+'/'+run.files.length+'</span>')+
+      hint('파일마다 유형만 분류하고(추출 없음), 파악이 끝나면 유형별로 규칙을 제안받아요.')+
+      `<div class="space-y-1">${run.files.map(f=>`<div class="flex items-center gap-2 py-1 text-[13px]">
+        ${f.doc_type?'<span class="text-[#00A05C] font-bold">✓</span>':f.status==='error'?'<span class="text-[#F04452] font-bold">✗</span>':'<span class="w-3 h-3 rounded-full border-2 border-[#3182F6] border-t-transparent animate-spin inline-block"></span>'}
+        <span class="truncate flex-1">${esc(f.filename)}</span>
+        <span class="text-[#8B95A1] text-[12px]">${esc(f.doc_type||'')}</span></div>`).join('')||'<p class="text-[13px] text-[#8B95A1]">문서 변환 중…</p>'}</div>`);
+    pollTimer=setInterval(()=>viewOnboard(id),2500);return}
+  if(!run){
+    $('#main').innerHTML=card(h2('1단계 — 샘플 ZIP 업로드')+
+      hint('이 심사에서 받게 될 서류를 대표하는 샘플 묶음(1~2개 제출건이면 충분)을 올려주세요. AI 가 <b>서류의 전체 집합</b>을 파악하고 유형별 점검 규칙을 제안해요. 이 단계에서는 추출·심사를 하지 않아 비용이 적어요 (파일당 분류 1회 + 유형당 제안 1회).')+
+      `<form id="obform" class="space-y-3">
+        <input name="zip" type="file" accept=".zip" required class="block w-full text-[13px] text-[#4E5968] file:mr-3 file:px-4 file:py-2.5 file:rounded-xl file:border-0 file:bg-[#E8F3FF] file:text-[#3182F6] file:text-[13px] file:font-bold file:cursor-pointer">
+        <button class="${P} w-full py-3">샘플 분석 시작</button></form>`,'max-w-[560px] mx-auto');
+    $('#obform').addEventListener('submit',async e=>{e.preventDefault();e.target.querySelector('button').disabled=true;
+      await api('/api/packs/'+id+'/onboard',{method:'POST',body:new FormData(e.target)});viewOnboard(id)});
+    return}
+  // 확정 화면: 파악된 서류 전체 집합 + 유형별 제안 규칙
+  const byType={};(run.files||[]).forEach(f=>{if(f.doc_type)(byType[f.doc_type]=byType[f.doc_type]||[]).push(f)});
+  const ruleRow=r=>`<div class="flex items-center gap-2.5 py-2 border-b border-[#F2F4F6] last:border-0">
+    ${badge(r.rule_type,r.rule_type==='verify'?'uncertain':'skipped')}
+    <div class="min-w-0 flex-1"><p class="text-[13.5px] font-semibold">${esc(r.field)}${r.sensitive?' '+badge('민감·마스킹','fail'):''}</p>
+      <p class="text-[12px] text-[#8B95A1] truncate">${esc(r.instruction)}</p></div>
+    <button class="${r.sensitive?PS:GS} shrink-0" onclick="toggleSensitive(${r.id})">민감</button>
+    <button class="${GS} shrink-0" onclick="delRule(${r.id})">삭제</button></div>`;
+  $('#main').innerHTML=`
+  ${p.status==='ready'?card(`<p class="text-[14px] font-bold text-[#00A05C]">온보딩 확정 완료 — 이제 <a href="#home" class="underline">홈에서 심사를 시작</a>할 수 있어요.</p>`,'mb-5'):''}
+  <div class="grid lg:grid-cols-[420px_1fr] gap-5 items-start">
+  <section class="space-y-5">
+    ${card(h2('2단계 — 서류 전체 집합 확인 <span class="text-[12px] font-bold text-[#3182F6] bg-[#E8F3FF] px-2 py-0.5 rounded-full">'+p.doc_types.length+'종 파악</span>')+
+      hint('샘플에서 파악된 유형이에요. 필수↔선택을 조정하고, 잘못 갈라진 유형은 삭제하세요. 누락된 유형은 직접 추가할 수 있어요.')+
+      `<div class="divide-y divide-[#F2F4F6]">${p.doc_types.map(t=>`
+        <div class="flex items-center gap-3 py-2.5">
+          <button class="${t.required?'bg-[#3182F6] text-white':'bg-[#F2F4F6] text-[#8B95A1]'} ${SM} shrink-0 w-[52px]" onclick="toggleDocType(${t.id})">${t.required?'필수':'선택'}</button>
+          <div class="min-w-0 flex-1"><p class="text-[14px] font-semibold truncate">${esc(t.name)}</p>
+            <p class="text-[12px] text-[#8B95A1]">샘플 ${(byType[t.name]||[]).length}건</p></div>
+          <button class="${GS} shrink-0" onclick="delDocType(${t.id})">삭제</button></div>`).join('')}</div>
+      <form id="obdtform" class="flex gap-2 mt-4">
+        <input name="name" placeholder="유형 직접 추가" required class="${INP} flex-1">
+        <button class="${PS} shrink-0">추가</button></form>`)}
+    ${card(`<button class="${P} w-full py-3" onclick="finalizePack(${p.id})">온보딩 확정 — 심사 시작 가능하게</button>
+      <p class="text-[12px] text-[#8B95A1] mt-2.5">확정하면 이 서류 집합·규칙 기준으로 심사가 열려요. 확정 후에도 홈에서 수정할 수 있어요.</p>`)}
+  </section>
+  <section>
+    ${card(h2('3단계 — 유형별 제안 규칙 검토')+
+      hint('AI 가 샘플을 읽고 제안한 점검 항목이에요. 필요 없는 건 삭제하고, 개인정보(주민번호·계좌번호 등)는 <b>민감</b>을 켜세요 — 값이 마스킹돼 저장되고 증거 이미지도 남기지 않아요.')+
+      Object.entries(byType).map(([type])=>{
+        const rs=p.rules.filter(r=>r.doc_type===type);
+        return `<p class="text-[13px] font-bold mt-4 mb-1">${esc(type)} <span class="text-[#8B95A1] font-normal">(${rs.length})</span></p>`+
+          (rs.map(ruleRow).join('')||'<p class="text-[12px] text-[#8B95A1]">제안 없음</p>')}).join(''))}
+  </section></div>`;
+  const obdt=$('#obdtform');
+  if(obdt)obdt.addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);
+    await api('/api/doc_types',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pack_id:p.id,name:f.get('name'),required:true,filename_hints:'',description:''})});viewOnboard(id)});}
+async function finalizePack(id){
+  try{await api('/api/packs/'+id+'/finalize',{method:'POST'});CURPACK=id;location.hash='#home'}
+  catch(e){alert(e.message)}}
 async function checkFeedback(id,fb,subId){await api('/api/checks/'+id+'/feedback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({feedback:fb})});viewSubmission(subId)}
 async function runChecks(subId){const btn=$('#checkbtn');btn.disabled=true;btn.textContent='pro가 추출값을 검토하는 중…';
   await api('/api/submissions/'+subId+'/check',{method:'POST'});

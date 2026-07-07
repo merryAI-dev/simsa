@@ -64,7 +64,7 @@ def parse_multipart(headers, body: bytes) -> dict:
 
 
 def pack_rules(conn, pack_id: int, scope: str | None = None) -> list[dict]:
-    q = "SELECT id, doc_type, field, rule_type, scope, instruction FROM rules WHERE pack_id = %s"
+    q = "SELECT id, doc_type, field, rule_type, scope, sensitive, instruction FROM rules WHERE pack_id = %s"
     args: list = [pack_id]
     if scope:
         q += " AND scope = %s"
@@ -111,6 +111,7 @@ def detect_file(conn, file_id: int, pdf: Path, rules: list[dict], doc_types: lis
     page_paths = {p["page_no"]: p["image_path"] for p in conn.execute(
         "SELECT page_no, image_path FROM pages WHERE file_id = %s", (file_id,)).fetchall()}
     crops_dir = DATA / f"file_{file_id}" / "crops"
+    sensitive_rules = {r["id"] for r in rules if r.get("sensitive")}
     for d in result["detections"]:
         page_no = int(d.get("page") or 1)
         box = [int(v) for v in d["box_2d"]]
@@ -125,6 +126,8 @@ def detect_file(conn, file_id: int, pdf: Path, rules: list[dict], doc_types: lis
         ).fetchone()["id"]
         crop_path = ""
         img_path = page_paths.get(page_no)
+        if d.get("rule_id") in sensitive_rules:
+            img_path = None  # 민감 필드는 증거 crop 을 저장하지 않는다 (원본 값 노출 방지)
         if img_path:
             out = crops_dir / f"d{det_id}.png"
             try:
@@ -316,6 +319,80 @@ def process_submission(sub_id: int, zip_path: Path, pack_id: int) -> None:
             conn.execute("UPDATE submissions SET status = 'error', error = %s WHERE id = %s", (str(e)[:500], sub_id))
 
 
+def process_onboarding(sub_id: int, zip_path: Path, pack_id: int) -> None:
+    """온보딩: 샘플 ZIP 에서 '서류의 전체 집합'을 파악하고 유형별 규칙을 일괄 제안한다.
+    추출·심사는 하지 않는다 — 파일당 분류 1회 + 유형당 제안 1회만 호출 (저비용).
+    사람이 확정(finalize)해야 팩이 ready 가 되고 일반 심사가 열린다."""
+    api_key = load_api_key()
+    cache = VLMCache(BASE / "cache/vlm", prompt_version=PROMPT_VERSION)
+    run_dir = DATA / f"sub_{sub_id}"
+    converted = run_dir / "converted"
+    try:
+        proc = subprocess.run(
+            [sys.executable, "batch_convert.py", str(zip_path), str(converted), "4"],
+            cwd=BASE, text=True, capture_output=True,
+        )
+        if proc.returncode:
+            raise RuntimeError(f"변환 실패: {(proc.stdout + proc.stderr)[-500:]}")
+        pdfs = sorted(p for p in converted.rglob("*.pdf"))
+        # 유형 분류: 규칙 없이 doc_type 판별만. 이 런에서 발견한 유형을 누적해 다음 파일의
+        # 분류 힌트로 넘긴다 — 같은 유형이 "주민등록증"/"신분증"으로 갈라지는 것을 줄인다.
+        seen_types: dict[str, Path] = {}  # 유형명 → 대표(첫) 파일
+        for pdf in pdfs:
+            with db.connect() as conn:
+                file_id = conn.execute(
+                    "INSERT INTO files (submission_id, filename, pdf_path) VALUES (%s, %s, %s) RETURNING id",
+                    (sub_id, pdf.name, str(pdf)),
+                ).fetchone()["id"]
+            try:
+                registry = [{"name": n, "filename_hints": [], "description": ""} for n in seen_types]
+                result, _ = detect(pdf, [], registry, cache, api_key, filename=pdf.name)
+                doc_type = (result.get("doc_type") or "미분류").strip() or "미분류"
+                with db.connect() as conn:
+                    page_dir = DATA / f"file_{file_id}"
+                    pages = render_pages(pdf, page_dir)
+                    for p in pages:
+                        conn.execute(
+                            "INSERT INTO pages (file_id, page_no, image_path, width, height) VALUES (%s, %s, %s, %s, %s)",
+                            (file_id, p["page_no"], p["image_path"], p["width"], p["height"]),
+                        )
+                    conn.execute(
+                        "UPDATE files SET doc_type = %s, page_count = %s, status = 'detected' WHERE id = %s",
+                        (doc_type, len(pages), file_id),
+                    )
+                seen_types.setdefault(doc_type, pdf)
+            except Exception as e:
+                with db.connect() as conn:
+                    conn.execute("UPDATE files SET status = 'error', error = %s WHERE id = %s", (str(e)[:300], file_id))
+        # 유형 레지스트리 등록 (필수 기본값, 사람이 확정 화면에서 조정)
+        with db.connect() as conn:
+            for name in seen_types:
+                conn.execute(
+                    "INSERT INTO doc_types (pack_id, name, required) VALUES (%s, %s, true) "
+                    "ON CONFLICT (pack_id, name) DO NOTHING", (pack_id, name),
+                )
+        # 유형당 규칙 제안 1회 (대표 파일 기준)
+        for doc_type, pdf in seen_types.items():
+            try:
+                with db.connect() as conn:
+                    existing = pack_rules(conn, pack_id)
+                suggestions = suggest_rules(pdf, doc_type, existing, api_key)
+                with db.connect() as conn:
+                    for s in suggestions:
+                        conn.execute(
+                            "INSERT INTO rules (pack_id, doc_type, field, rule_type, instruction) "
+                            "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (pack_id, doc_type, field) DO NOTHING",
+                            (pack_id, doc_type, s["field"], s["rule_type"], s["instruction"]),
+                        )
+            except Exception as e:
+                print(f"[onboard {sub_id}] {doc_type} 규칙 제안 실패: {e}")
+        with db.connect() as conn:
+            conn.execute("UPDATE submissions SET status = 'ready' WHERE id = %s", (sub_id,))
+    except Exception as e:
+        with db.connect() as conn:
+            conn.execute("UPDATE submissions SET status = 'error', error = %s WHERE id = %s", (str(e)[:500], sub_id))
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urlparse(self.path).path
@@ -324,11 +401,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_bytes(UI_PATH.read_text(encoding="utf-8").encode(), "text/html; charset=utf-8")
             if path == "/api/bootstrap":
                 with db.connect() as conn:
-                    packs = conn.execute("SELECT id, slug, name FROM packs ORDER BY id").fetchall()
+                    packs = conn.execute("SELECT id, slug, name, status FROM packs ORDER BY id").fetchall()
                     for p in packs:
                         p["rules"] = pack_rules(conn, p["id"])
                         p["doc_types"] = pack_doc_types(conn, p["id"])
                 return self.send_json({"packs": packs})
+            if path.startswith("/api/packs/") and path.endswith("/onboarding"):
+                return self.get_onboarding(int(path.split("/")[3]))
             if path == "/api/submissions":
                 with db.connect() as conn:
                     rows = conn.execute(
@@ -336,7 +415,7 @@ class Handler(BaseHTTPRequestHandler):
                         " (SELECT count(*) FROM files f WHERE f.submission_id = s.id) AS file_count,"
                         " (SELECT count(*) FROM detections d JOIN files f ON f.id = d.file_id WHERE f.submission_id = s.id) AS detection_count,"
                         " (SELECT count(*) FROM golden_verdicts g WHERE g.submission_id = s.id) AS golden_count "
-                        "FROM submissions s ORDER BY s.id DESC LIMIT 50"
+                        "FROM submissions s WHERE s.kind = 'screening' ORDER BY s.id DESC LIMIT 50"
                     ).fetchall()
                 return self.send_json(rows)
             if path == "/api/golden_runs":
@@ -492,6 +571,25 @@ class Handler(BaseHTTPRequestHandler):
         with open(path, "rb") as fh:
             shutil.copyfileobj(fh, self.wfile)
 
+    def get_onboarding(self, pack_id: int) -> None:
+        """온보딩 화면 데이터: 팩 + 최근 온보딩 런(파일별 분류) + 파악된 유형 집합 + 제안 규칙."""
+        with db.connect() as conn:
+            pack = conn.execute("SELECT id, slug, name, status FROM packs WHERE id = %s", (pack_id,)).fetchone()
+            if not pack:
+                return self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            run = conn.execute(
+                "SELECT * FROM submissions WHERE pack_id = %s AND kind = 'onboarding' "
+                "ORDER BY id DESC LIMIT 1", (pack_id,),
+            ).fetchone()
+            if run:
+                run["files"] = conn.execute(
+                    "SELECT id, filename, doc_type, status, error FROM files "
+                    "WHERE submission_id = %s ORDER BY id", (run["id"],),
+                ).fetchall()
+            pack["doc_types"] = pack_doc_types(conn, pack_id)
+            pack["rules"] = pack_rules(conn, pack_id)
+        self.send_json({"pack": pack, "run": run})
+
     def get_audit(self, sub_id: int) -> None:
         """시간순 append-only 증거 로그 — AI 가 실제로 본 것 + 사람 확정 이력."""
         with db.connect() as conn:
@@ -532,6 +630,36 @@ class Handler(BaseHTTPRequestHandler):
                         (body["pack_id"], body["name"].strip(), bool(body.get("required")), hints,
                          (body.get("description") or "").strip()),
                     )
+                return self.send_json({"ok": True})
+            if path == "/api/packs":
+                body = self.json_body()
+                name = (body.get("name") or "").strip()
+                if not name:
+                    return self.send_json({"error": "팩 이름이 필요합니다"}, HTTPStatus.BAD_REQUEST)
+                slug = "pack-" + "".join(c if c.isalnum() else "-" for c in name.lower())[:40]
+                with db.connect() as conn:
+                    row = conn.execute(
+                        "INSERT INTO packs (slug, name, status) VALUES (%s, %s, 'onboarding') "
+                        "ON CONFLICT (slug) DO NOTHING RETURNING id", (slug, name),
+                    ).fetchone()
+                    if not row:
+                        return self.send_json({"error": "같은 이름의 팩이 이미 있어요"}, HTTPStatus.BAD_REQUEST)
+                return self.send_json({"id": row["id"]})
+            if path.startswith("/api/packs/") and path.endswith("/onboard"):
+                return self.start_onboarding(int(path.split("/")[3]))
+            if path.startswith("/api/packs/") and path.endswith("/finalize"):
+                pack_id = int(path.split("/")[3])
+                with db.connect() as conn:
+                    n = conn.execute("SELECT count(*) AS n FROM doc_types WHERE pack_id = %s", (pack_id,)).fetchone()["n"]
+                    if not n:
+                        return self.send_json({"error": "확정할 문서 유형이 없어요. 샘플 ZIP 을 먼저 올리거나 유형을 직접 추가하세요."},
+                                              HTTPStatus.BAD_REQUEST)
+                    conn.execute("UPDATE packs SET status = 'ready' WHERE id = %s", (pack_id,))
+                return self.send_json({"ok": True})
+            if path.startswith("/api/rules/") and path.endswith("/toggle_sensitive"):
+                rule_id = int(path.split("/")[3])
+                with db.connect() as conn:
+                    conn.execute("UPDATE rules SET sensitive = NOT sensitive WHERE id = %s", (rule_id,))
                 return self.send_json({"ok": True})
             if path.startswith("/api/files/") and path.endswith("/suggest_rules"):
                 return self.suggest(int(path.split("/")[3]))
@@ -638,6 +766,11 @@ class Handler(BaseHTTPRequestHandler):
         base_date = (parts.get("base_date", ("", b""))[1] or b"").decode().strip() or None
         filename = Path(parts["zip"][0] or "upload.zip").name
         with db.connect() as conn:
+            pack = conn.execute("SELECT status FROM packs WHERE id = %s", (pack_id,)).fetchone()
+            if not pack or pack["status"] != "ready":
+                # 전체 집합 파악(온보딩 확정) 전에는 심사를 시작하지 않는다
+                return self.send_json({"error": "이 팩은 아직 온보딩 중이에요. 서류 집합·규칙을 확정한 뒤 심사를 시작할 수 있어요."},
+                                      HTTPStatus.BAD_REQUEST)
             sub_id = conn.execute(
                 "INSERT INTO submissions (pack_id, name, base_date) "
                 "VALUES (%s, %s, COALESCE(%s::date, CURRENT_DATE)) RETURNING id",
@@ -648,6 +781,24 @@ class Handler(BaseHTTPRequestHandler):
         zip_path = run_dir / filename
         zip_path.write_bytes(parts["zip"][1])
         threading.Thread(target=process_submission, args=(sub_id, zip_path, pack_id), daemon=True).start()
+        self.send_json({"id": sub_id})
+
+    def start_onboarding(self, pack_id: int) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        parts = parse_multipart(self.headers, self.rfile.read(length))
+        if "zip" not in parts or not parts["zip"][1]:
+            raise ValueError("zip 파일이 없습니다")
+        filename = Path(parts["zip"][0] or "sample.zip").name
+        with db.connect() as conn:
+            sub_id = conn.execute(
+                "INSERT INTO submissions (pack_id, name, kind) VALUES (%s, %s, 'onboarding') RETURNING id",
+                (pack_id, "온보딩 샘플: " + filename.removesuffix(".zip")),
+            ).fetchone()["id"]
+        run_dir = DATA / f"sub_{sub_id}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        zip_path = run_dir / filename
+        zip_path.write_bytes(parts["zip"][1])
+        threading.Thread(target=process_onboarding, args=(sub_id, zip_path, pack_id), daemon=True).start()
         self.send_json({"id": sub_id})
 
     def save_golden(self, file_id: int) -> None:

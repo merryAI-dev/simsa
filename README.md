@@ -35,7 +35,7 @@ echo "GEMINI_API_KEY=여기에_키" > .env && chmod 600 .env
 
 ```
 review_app.py     # 검토 서버: 업로드·검토 UI + API (포트 8766)
-detect_fields.py  # 유형 판별 + 필드 탐지 (Gemini box_2d, detect-v2 프롬프트)
+detect_fields.py  # 유형 판별 + 필드 탐지 (Gemini box_2d, detect-v3 프롬프트)
 db.py             # PostgreSQL 연결·마이그레이션·시드 (koica-cts 팩)
 schema.sql        # packs/doc_types/rules/submissions/files/pages/detections/golden_verdicts
 start_review.sh   # 로컬 원커맨드 실행 (postgres 컨테이너 자동 기동)
